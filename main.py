@@ -844,35 +844,48 @@ async def validate_targets(targets: list[str], sessions: list[str], api_id: int 
         api_id = config.API_ID
         api_hash = config.API_HASH
 
-    client = Client(
-        name="target_validator",
-        api_id=api_id,
-        api_hash=api_hash,
-        session_string=sessions[0],
-        workdir="/tmp/target_validator",
-    )
+    last_error: str | None = None
 
-    try:
-        await client.start()
+    for idx, session in enumerate(sessions):
+        client = Client(
+            name=f"target_validator_{idx}",
+            api_id=api_id,
+            api_hash=api_hash,
+            session_string=session,
+            workdir=f"/tmp/target_validator_{idx}",
+        )
 
-        for target in targets:
-            try:
-                await resolve_chat_id(client, target)
-            except UsernameNotOccupied:
-                return False, f"The username or link '{target}' is not occupied. Please check it."
-            except BadRequest as exc:
-                return False, f"The link '{target}' is not valid: {exc}."
-            except ValueError as exc:
-                return False, f"The link '{target}' is not valid: {exc}."
-            except RPCError as exc:
-                return False, f"Could not resolve '{target}' ({exc})."
-
-        return True, None
-    finally:
         try:
-            await client.stop()
+            await client.start()
+
+            for target in targets:
+                try:
+                    await resolve_chat_id(client, target)
+                except UsernameNotOccupied:
+                    last_error = f"The username or link '{target}' is not occupied. Please check it."
+                    raise
+                except BadRequest as exc:
+                    last_error = f"The link '{target}' is not valid: {exc}."
+                    raise
+                except ValueError as exc:
+                    last_error = f"The link '{target}' is not valid: {exc}."
+                    raise
+                except RPCError as exc:
+                    last_error = f"Could not resolve '{target}' ({exc})."
+                    raise
+
+            # All targets resolved successfully with this session
+            return True, None
         except Exception:
-            pass
+            # Move on to the next session if available
+            continue
+        finally:
+            try:
+                await client.stop()
+            except Exception:
+                pass
+
+    return False, last_error or "Unable to validate the provided targets with the available sessions."
 
 
 async def perform_reporting(
