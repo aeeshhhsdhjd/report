@@ -163,15 +163,14 @@ if not hasattr(Client, "send_report"):
         """High-level wrapper for the raw ``messages.Report`` call."""
 
         try:
-            peer = None
-            if hasattr(self, "resolve_peer"):
-                try:
-                    resolved = self.resolve_peer(chat_id)
-                    peer = await resolved if asyncio.iscoroutine(resolved) else resolved
-                except Exception:
-                    peer = chat_id
-            else:
+            if hasattr(chat_id, "write"):
                 peer = chat_id
+            else:
+                peer = self.resolve_peer(chat_id) if hasattr(self, "resolve_peer") else chat_id
+                peer = await peer if asyncio.iscoroutine(peer) else peer
+
+            if not hasattr(peer, "write"):
+                raise BadRequest("Unable to resolve the target for reporting.")
 
             reason_obj = _build_reason(reason, message)
 
