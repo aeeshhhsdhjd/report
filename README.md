@@ -1,6 +1,6 @@
 # Reaction Reporter Bot
 
-This project provides a Telegram bot that coordinates multiple Pyrogram session strings to submit reports against profiles, groups, channels, or stories. The bot runs with buttons and command handlers so it works well on VPS, Termux, Replit, or Heroku.
+This project provides a Telegram bot that coordinates multiple Pyrogram session strings to submit reports against profiles, groups, channels, or stories. The bot ships with a premium, dark-themed chat UI with clear buttons and guardrails for every step.
 
 ## Features
 - Guided flow that collects API ID, API Hash, and 1–500 Pyrogram session strings.
@@ -19,7 +19,7 @@ This project provides a Telegram bot that coordinates multiple Pyrogram session 
 - Dependencies from `requirements.txt`
 
 ## Environment variables
-Set these before running the bot (or edit `config.py`):
+Set these before running the bot (or edit `config.py` to source them another way):
 
 - `BOT_TOKEN`: Telegram bot token.
 - `API_ID`: Default Telegram API ID (used if the user does not provide one).
