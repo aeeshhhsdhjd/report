@@ -862,9 +862,10 @@ async def validate_targets(targets: list[str], sessions: list[str], api_id: int 
                 try:
                     await resolve_chat_id(client, target)
                 except UsernameNotOccupied:
-                    # This error is deterministic for the target, so do not waste time
-                    # retrying with other sessions. Surface it immediately.
-                    return False, f"The username or link '{target}' is not occupied. Please check it."
+                    # The current session may not have access to the target. Try the next
+                    # session before surfacing the error back to the user.
+                    last_error = f"The username or link '{target}' is not occupied. Please check it."
+                    raise
                 except BadRequest as exc:
                     last_error = f"The link '{target}' is not valid: {exc}."
                     raise
@@ -928,20 +929,33 @@ async def perform_reporting(
     reason_text = "; ".join(reasons)[:512] or "No reason provided"
 
     try:
-        try:
-            chat_id = await resolve_chat_id(clients[0], target)
-        except UsernameNotOccupied:
+        chat_id: int | None = None
+        last_error: str | None = None
+
+        for client in clients:
+            try:
+                chat_id = await resolve_chat_id(client, target)
+                break
+            except UsernameNotOccupied:
+                last_error = (
+                    "The username or link appears to be unoccupied or deleted. "
+                    "Please verify the target and try again."
+                )
+                continue
+            except BadRequest as exc:
+                last_error = f"The link '{target}' is not valid: {exc}."
+                break
+            except RPCError as exc:
+                last_error = f"Could not resolve '{target}' ({exc})."
+                continue
+
+        if chat_id is None:
             return {
                 "success": 0,
                 "failed": 0,
                 "halted": True,
-                "error": (
-                    "The username or link appears to be unoccupied or deleted. "
-                    "Please verify the target and try again."
-                ),
+                "error": last_error or "Unable to resolve the target with the available sessions.",
             }
-        except (BadRequest, RPCError) as exc:
-            return {"success": 0, "failed": 0, "halted": True, "error": str(exc)}
 
         success = 0
         failed = 0
