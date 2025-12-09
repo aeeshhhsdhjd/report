@@ -929,7 +929,17 @@ async def perform_reporting(
     try:
         try:
             chat_id = await resolve_chat_id(clients[0], target)
-        except (BadRequest, RPCError, UsernameNotOccupied) as exc:
+        except UsernameNotOccupied:
+            return {
+                "success": 0,
+                "failed": 0,
+                "halted": True,
+                "error": (
+                    "The username or link appears to be unoccupied or deleted. "
+                    "Please verify the target and try again."
+                ),
+            }
+        except (BadRequest, RPCError) as exc:
             return {"success": 0, "failed": 0, "halted": True, "error": str(exc)}
 
         success = 0
