@@ -173,7 +173,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• Choose a report type, add a short reason, and send 500-7000 reports (default 5000).\n"
         "Use /report to begin or the panel below."
     )
+    mockup = (
+        "🛠️ *Dark chat mockup reference*\n"
+        "• **User bubble:** Rounded charcoal gradient with crisp `/start` text tucked in the top-left.\n"
+        "• **Bot reply card:** A wide, soft-cornered box under the user bubble; add a subtle border/glow, title with an emoji, and roomy bullet spacing for the instructions.\n"
+        "• **Primary buttons:** Three stacked, pill-shaped buttons with bold labels—`Start report`, `Add sessions`, `Saved sessions`—spaced for finger taps.\n"
+        "• **Inline status bubbles:** Small chips below the buttons to show flow state, e.g. `🟢 Live · Sessions: 128`, `⚠️ Waiting for API ID`, `✅ Ready to report`."
+    )
+
     await update.effective_message.reply_text(greeting, reply_markup=main_menu_keyboard())
+    await update.effective_message.reply_text(mockup, parse_mode=ParseMode.MARKDOWN)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
