@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
-"""Telegram reporting bot that coordinates multiple Pyrogram sessions."""
+"""Telegram reporting bot with a guided, premium-style chat UI.
+
+The bot coordinates multiple Pyrogram session strings to submit reports against
+Telegram profiles, groups, channels, or stories. The conversation flow focuses
+on clarity, guardrails, and graceful error handling so users can complete a
+full reporting run without surprises.
+"""
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import logging
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Iterable, List
 from urllib.parse import urlparse
@@ -49,16 +56,26 @@ MAX_REPORTS = 7000
 MIN_SESSIONS = 1
 MAX_SESSIONS = 500
 
+MENU_LIVE_STATUS = "Live"
+
+
 data_store = DataStore(config.MONGO_URI)
 
 
+# ---------------------------------------------------------------------------
+# Utility helpers
+# ---------------------------------------------------------------------------
+
 def build_logger() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+    )
 
 
 def ensure_token() -> str:
     if not config.BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN is required. Set it in the environment or config.py")
+        raise RuntimeError("BOT_TOKEN is required. Set it as an environment variable.")
     return config.BOT_TOKEN
 
 
@@ -76,7 +93,74 @@ def verify_author_integrity(author_name: str, expected_hash: str) -> None:
         raise SystemExit(1)
 
 
-def main_menu_keyboard(saved_sessions: int = 0, active_sessions: int = 0, live_status: str = "Live") -> InlineKeyboardMarkup:
+def friendly_error(message: str) -> str:
+    return f"⚠️ {message}\nUse the menu below or try again."
+
+
+def parse_reasons(text: str) -> List[str]:
+    reasons = [line.strip() for line in text.replace(";", "\n").splitlines() if line.strip()]
+    return reasons[:5]
+
+
+def parse_links(text: str) -> list[str]:
+    links: list[str] = []
+    for chunk in text.replace(";", "\n").split():
+        if is_valid_link(chunk):
+            links.append(chunk)
+    return links[:5]
+
+
+def is_valid_link(text: str) -> bool:
+    text = text.strip()
+    if text.startswith("@"):  # username shorthand
+        return len(text) > 1
+    parsed = urlparse(text if text.startswith("http") else f"https://{text}")
+    return parsed.netloc.endswith("t.me") and len(parsed.path.strip("/")) > 0
+
+
+def extract_target_identifier(text: str) -> str:
+    text = text.strip()
+    if text.startswith("@"):  # username
+        return text[1:]
+
+    parsed = urlparse(text if text.startswith("http") else f"https://{text}")
+    path = parsed.path.lstrip("/")
+    return path.split("/", maxsplit=1)[0]
+
+
+def session_strings_from_text(text: str) -> list[str]:
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+async def validate_sessions(api_id: int, api_hash: str, sessions: list[str]) -> tuple[list[str], list[str]]:
+    """Start/stop each session to confirm validity."""
+
+    valid: list[str] = []
+    invalid: list[str] = []
+
+    for idx, session in enumerate(sessions):
+        client = Client(
+            name=f"validation_{idx}", api_id=api_id, api_hash=api_hash, session_string=session, workdir=f"/tmp/validate_{idx}"
+        )
+        try:
+            await client.start()
+            valid.append(session)
+        except Exception:
+            invalid.append(session)
+        finally:
+            try:
+                await client.stop()
+            except Exception:
+                pass
+
+    return valid, invalid
+
+
+# ---------------------------------------------------------------------------
+# UI builders
+# ---------------------------------------------------------------------------
+
+def main_menu_keyboard(saved_sessions: int = 0, active_sessions: int = 0, live_status: str = MENU_LIVE_STATUS) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("🚀 Start report", callback_data="action:start")],
@@ -120,72 +204,9 @@ def session_mode_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def friendly_error(message: str) -> str:
-    return f"⚠️ {message}\nUse the menu below or try again."
-
-
-def parse_reasons(text: str) -> List[str]:
-    reasons = [line.strip() for line in text.replace(";", "\n").splitlines() if line.strip()]
-    return reasons[:5]
-
-
-def parse_links(text: str) -> list[str]:
-    links: list[str] = []
-    for chunk in text.replace(";", "\n").split():
-        if is_valid_link(chunk):
-            links.append(chunk)
-    return links[:5]
-
-
-def is_valid_link(text: str) -> bool:
-    text = text.strip()
-    return text.startswith("https://t.me/") or text.startswith("t.me/") or text.startswith("@")
-
-
-def extract_target_identifier(text: str) -> str:
-    text = text.strip()
-    if text.startswith("@"):  # username
-        return text[1:]
-
-    parsed = urlparse(text if text.startswith("http") else f"https://{text}")
-    path = parsed.path.lstrip("/")
-    return path.split("/", maxsplit=1)[0]
-
-
-def session_strings_from_text(text: str) -> list[str]:
-    return [line.strip() for line in text.splitlines() if line.strip()]
-
-
-async def validate_sessions(api_id: int, api_hash: str, sessions: list[str]) -> tuple[list[str], list[str]]:
-    """Start/stop each session to confirm validity."""
-
-    valid: list[str] = []
-    invalid: list[str] = []
-
-    for idx, session in enumerate(sessions):
-        client = Client(
-            name=f"validation_{idx}", api_id=api_id, api_hash=api_hash, session_string=session, workdir=f"/tmp/validate_{idx}"
-        )
-        try:
-            await client.start()
-            valid.append(session)
-        except Exception:
-            invalid.append(session)
-        finally:
-            try:
-                await client.stop()
-            except Exception:
-                pass
-
-    return valid, invalid
-
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    saved_sessions = len(await data_store.get_sessions())
-    active_sessions = len(context.user_data.get("sessions", []))
-
-    greeting = (
-        "╭━━━━━━━✦ DARK MODE ONLINE ✦━━━━━━━╮\n"
+def render_greeting() -> str:
+    return (
+        "━━━━━━━✦ DARK MODE ONLINE ✦━━━━━━━╮\n"
         "🤖 *Nightfall Reporter* — premium chat cockpit engaged.\n"
         "╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n"
         "🖤 Polished bubbles, elevated reply cards, and tactile pill buttons are live.\n"
@@ -194,10 +215,46 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "\nTap a control to begin."
     )
 
+
+# ---------------------------------------------------------------------------
+# State helpers
+# ---------------------------------------------------------------------------
+
+def profile_state(context: ContextTypes.DEFAULT_TYPE) -> dict:
+    return context.user_data.setdefault("profile", {})
+
+
+def flow_state(context: ContextTypes.DEFAULT_TYPE) -> dict:
+    return context.user_data.setdefault("flow", {})
+
+
+def reset_flow_state(context: ContextTypes.DEFAULT_TYPE) -> dict:
+    context.user_data["flow"] = {}
+    return context.user_data["flow"]
+
+
+def saved_session_count(context: ContextTypes.DEFAULT_TYPE) -> int:
+    return len(profile_state(context).get("saved_sessions", []))
+
+
+def active_session_count(context: ContextTypes.DEFAULT_TYPE) -> int:
+    return len(flow_state(context).get("sessions", []))
+
+
+# ---------------------------------------------------------------------------
+# Command handlers
+# ---------------------------------------------------------------------------
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    profile = profile_state(context)
+    profile.setdefault("saved_sessions", await data_store.get_sessions())
+
+    greeting = render_greeting()
+
     await update.effective_message.reply_text(
         greeting,
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=main_menu_keyboard(saved_sessions, active_sessions),
+        reply_markup=main_menu_keyboard(len(profile["saved_sessions"]), active_session_count(context)),
     )
 
 
@@ -217,7 +274,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def show_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     saved = len(await data_store.get_sessions())
-    active = len(context.user_data.get("sessions", []))
+    active = active_session_count(context)
     await update.effective_message.reply_text(
         f"Saved sessions: {saved}\nCurrently loaded for this chat: {active}",
         reply_markup=main_menu_keyboard(saved, active),
@@ -234,7 +291,7 @@ async def handle_action_buttons(update: Update, context: ContextTypes.DEFAULT_TY
         return ADD_SESSIONS
     if query.data == "action:sessions":
         saved = len(await data_store.get_sessions())
-        active = len(context.user_data.get("sessions", []))
+        active = active_session_count(context)
         await query.edit_message_text(
             f"Saved sessions: {saved}\nCurrently loaded for this chat: {active}",
             reply_markup=main_menu_keyboard(saved, active),
@@ -252,17 +309,19 @@ async def handle_session_mode(update: Update, context: ContextTypes.DEFAULT_TYPE
     query = update.callback_query
     await query.answer()
 
-    saved_sessions = context.user_data.get("saved_sessions", [])
+    profile = profile_state(context)
 
     if query.data == "session_mode:reuse":
+        saved_sessions = profile.get("saved_sessions", [])
         if not saved_sessions:
             await query.edit_message_text(
                 friendly_error("No saved sessions available. Please add new sessions to continue."),
-                reply_markup=main_menu_keyboard(len(saved_sessions), len(context.user_data.get("sessions", []))),
+                reply_markup=main_menu_keyboard(len(saved_sessions), active_session_count(context)),
             )
             return ConversationHandler.END
 
-        context.user_data["sessions"] = list(saved_sessions)
+        flow = reset_flow_state(context)
+        flow["sessions"] = list(saved_sessions)
         await query.edit_message_text(
             "Using your saved sessions. What are you reporting?",
             reply_markup=target_kind_keyboard(),
@@ -276,23 +335,21 @@ async def handle_session_mode(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def start_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    saved_api_id = context.user_data.get("saved_api_id") or config.API_ID
-    saved_api_hash = context.user_data.get("saved_api_hash") or config.API_HASH
-    saved_sessions = context.user_data.get("saved_sessions")
-    if saved_sessions is None:
-        saved_sessions = await data_store.get_sessions()
+    profile = profile_state(context)
+    flow = reset_flow_state(context)
 
-    # Reset conversation-specific values while keeping any previously stored credentials/sessions
-    context.user_data.clear()
-    if saved_api_id and saved_api_hash:
-        context.user_data["saved_api_id"] = saved_api_id
-        context.user_data["saved_api_hash"] = saved_api_hash
-    if saved_sessions:
-        context.user_data["saved_sessions"] = list(saved_sessions)
+    profile.setdefault("saved_sessions", await data_store.get_sessions())
+
+    saved_api_id = profile.get("api_id") or config.API_ID
+    saved_api_hash = profile.get("api_hash") or config.API_HASH
 
     if saved_api_id and saved_api_hash:
-        context.user_data["api_id"] = saved_api_id
-        context.user_data["api_hash"] = saved_api_hash
+        flow["api_id"] = saved_api_id
+        flow["api_hash"] = saved_api_hash
+        profile["api_id"] = saved_api_id
+        profile["api_hash"] = saved_api_hash
+
+        saved_sessions = profile.get("saved_sessions", [])
         if saved_sessions:
             await update.effective_message.reply_text(
                 (
@@ -321,8 +378,8 @@ async def handle_api_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         await update.effective_message.reply_text(friendly_error("API ID must be numeric."))
         return API_ID_STATE
 
-    context.user_data["api_id"] = int(text)
-    context.user_data["saved_api_id"] = int(text)
+    flow_state(context)["api_id"] = int(text)
+    profile_state(context)["api_id"] = int(text)
     await update.effective_message.reply_text("Enter your API Hash.")
     return API_HASH_STATE
 
@@ -333,8 +390,8 @@ async def handle_api_hash(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.effective_message.reply_text(friendly_error("API Hash cannot be empty."))
         return API_HASH_STATE
 
-    context.user_data["api_hash"] = text
-    context.user_data["saved_api_hash"] = text
+    flow_state(context)["api_hash"] = text
+    profile_state(context)["api_hash"] = text
     await update.effective_message.reply_text(
         (
             f"Paste between {MIN_SESSIONS} and {MAX_SESSIONS} Pyrogram session strings (one per line).\n"
@@ -346,24 +403,21 @@ async def handle_api_hash(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def handle_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     text = (update.message.text or "").strip()
-    sessions: list[str] = []
+    flow = flow_state(context)
 
     if text.lower() == "use saved":
         sessions = await data_store.get_sessions()
         if len(sessions) < MIN_SESSIONS:
             await update.effective_message.reply_text(
-                friendly_error(
-                    f"Not enough saved sessions. Add at least {MIN_SESSIONS} with /addsessions or paste them now."
-                )
+                friendly_error(f"Not enough saved sessions. Add at least {MIN_SESSIONS} with /addsessions or paste them now."),
+                reply_markup=main_menu_keyboard(len(sessions), active_session_count(context)),
             )
             return REPORT_SESSIONS
     else:
         sessions = session_strings_from_text(text)
         if not (MIN_SESSIONS <= len(sessions) <= MAX_SESSIONS):
             await update.effective_message.reply_text(
-                friendly_error(
-                    f"Provide between {MIN_SESSIONS} and {MAX_SESSIONS} session strings (one per line)."
-                )
+                friendly_error(f"Provide between {MIN_SESSIONS} and {MAX_SESSIONS} session strings (one per line).")
             )
             return REPORT_SESSIONS
         added = await data_store.add_sessions(
@@ -373,19 +427,20 @@ async def handle_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"Stored {len(added)} new session(s). {len(sessions)} will be used for this run."
         )
 
-    valid, invalid = await validate_sessions(
-        context.user_data.get("api_id", 0), context.user_data.get("api_hash", ""), sessions
-    )
+    api_id = flow.get("api_id", 0)
+    api_hash = flow.get("api_hash", "")
+    valid, invalid = await validate_sessions(api_id, api_hash, sessions)
     if not valid:
         saved_count = len(await data_store.get_sessions())
         await update.effective_message.reply_text(
             friendly_error("No valid sessions were found. Please try again with fresh session strings."),
-            reply_markup=main_menu_keyboard(saved_count, len(context.user_data.get("sessions", []))),
+            reply_markup=main_menu_keyboard(saved_count, active_session_count(context)),
         )
         return ConversationHandler.END
 
-    context.user_data["sessions"] = valid
-    context.user_data["saved_sessions"] = valid
+    flow["sessions"] = valid
+    profile = profile_state(context)
+    profile["saved_sessions"] = valid
     if invalid:
         await update.effective_message.reply_text(f"Ignored {len(invalid)} invalid session(s); using {len(valid)} valid ones.")
 
@@ -398,7 +453,7 @@ async def handle_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def handle_target_kind(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
-    context.user_data["target_kind"] = query.data
+    flow_state(context)["target_kind"] = query.data
     await query.edit_message_text(
         "Send up to 5 Telegram URLs or @usernames to report (separated by spaces or new lines)."
     )
@@ -413,7 +468,7 @@ async def handle_report_urls(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return REPORT_URLS
 
-    context.user_data["targets"] = links
+    flow_state(context)["targets"] = links
     await update.effective_message.reply_text("Select the report type.", reply_markup=reason_keyboard())
     return REPORT_REASON_TYPE
 
@@ -422,7 +477,7 @@ async def handle_reason_type(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     await query.answer()
     _, _, code = query.data.partition(":")
-    context.user_data["reason_code"] = int(code or 5)
+    flow_state(context)["reason_code"] = int(code or 5)
     await query.edit_message_text("Add a short reason/message to include in the report.")
     return REPORT_MESSAGE
 
@@ -433,7 +488,7 @@ async def handle_reason_message(update: Update, context: ContextTypes.DEFAULT_TY
         await update.effective_message.reply_text(friendly_error("Please provide at least one reason line."))
         return REPORT_MESSAGE
 
-    context.user_data["reasons"] = reasons
+    flow_state(context)["reasons"] = reasons
     await update.effective_message.reply_text(
         f"How many report requests? (min {MIN_REPORTS}, max {MAX_REPORTS}, or 'default' for {DEFAULT_REPORTS})"
     )
@@ -457,14 +512,15 @@ async def handle_report_count(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return REPORT_COUNT
 
-    context.user_data["count"] = count
+    flow_state(context)["count"] = count
 
+    flow = flow_state(context)
     summary = (
-        f"Targets: {len(context.user_data.get('targets', []))}\n"
-        f"Reasons: {', '.join(context.user_data.get('reasons', []))}\n"
-        f"Report type: {context.user_data.get('reason_code')}\n"
-        f"Total reports each: {context.user_data.get('count')}\n"
-        f"Session count: {len(context.user_data.get('sessions', []))}"
+        f"Targets: {len(flow.get('targets', []))}\n"
+        f"Reasons: {', '.join(flow.get('reasons', []))}\n"
+        f"Report type: {flow.get('reason_code')}\n"
+        f"Total reports each: {flow.get('count')}\n"
+        f"Session count: {len(flow.get('sessions', []))}"
     )
 
     await update.effective_message.reply_text(
@@ -490,15 +546,7 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # Capture a snapshot of the current conversation data so that subsequent
     # /report runs do not erase the information needed by this background task.
-    job_data = {
-        "targets": list(context.user_data.get("targets", [])),
-        "reasons": list(context.user_data.get("reasons", [])),
-        "count": context.user_data.get("count", DEFAULT_REPORTS),
-        "sessions": list(context.user_data.get("sessions", [])),
-        "api_id": context.user_data.get("api_id"),
-        "api_hash": context.user_data.get("api_hash"),
-        "reason_code": context.user_data.get("reason_code", 5),
-    }
+    job_data = deepcopy(flow_state(context))
 
     asyncio.create_task(run_report_job(query, context, job_data))
     return ConversationHandler.END
@@ -697,15 +745,14 @@ async def receive_added_sessions(update: Update, context: ContextTypes.DEFAULT_T
     sessions = session_strings_from_text(update.message.text or "")
     if not (MIN_SESSIONS <= len(sessions) <= MAX_SESSIONS):
         await update.effective_message.reply_text(
-            friendly_error(
-                f"Please provide between {MIN_SESSIONS} and {MAX_SESSIONS} sessions."
-            )
+            friendly_error(f"Please provide between {MIN_SESSIONS} and {MAX_SESSIONS} sessions.")
         )
         return ADD_SESSIONS
 
     added = await data_store.add_sessions(
         sessions, added_by=update.effective_user.id if update.effective_user else None
     )
+    profile_state(context)["saved_sessions"] = (profile_state(context).get("saved_sessions") or []) + added
     await update.effective_message.reply_text(
         f"Stored {len(added)} new session(s). Total available: {len(await data_store.get_sessions())}."
     )
@@ -714,6 +761,7 @@ async def receive_added_sessions(update: Update, context: ContextTypes.DEFAULT_T
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.effective_message.reply_text("Canceled. Use /report to begin again.")
+    reset_flow_state(context)
     return ConversationHandler.END
 
 
@@ -722,6 +770,10 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     if isinstance(update, Update) and update.effective_message:
         await update.effective_message.reply_text("Something went wrong. Please try again later.")
 
+
+# ---------------------------------------------------------------------------
+# Application factory
+# ---------------------------------------------------------------------------
 
 def build_app() -> Application:
     application = (
@@ -772,14 +824,15 @@ def build_app() -> Application:
     return application
 
 
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
+
 def main() -> None:
     verify_author_integrity(config.AUTHOR_NAME, config.AUTHOR_HASH)
     build_logger()
     app = build_app()
 
-    # Application.run_polling takes care of initialization, startup, and shutdown
-    # logic. Running it directly avoids calling the deprecated Updater APIs that
-    # no longer provide an `idle` helper in PTB 21+.
     logging.info("Bot started and polling.")
     try:
         app.run_polling()

@@ -1,11 +1,10 @@
-"""Reporting helpers and pyrogram monkey patching.
+"""Reporting helpers built on top of pyrogram.Client.
 
-This module centralizes report submission for messages and profiles/chats.
-It also monkey-patches :class:`pyrogram.Client` with a `send_report` helper
-that wraps the raw MTProto ``messages.Report`` call. The functions are
-structured so the caller can centralize concurrency and retry logic.
+The module adds a small `send_report` helper to :class:`pyrogram.Client` so the
+bot can call the raw MTProto ``messages.Report`` RPC with clean ergonomics. The
+functions here keep networking concerns centralized: concurrency, retries, and
+basic resilience are handled by higher-level flows in ``main.py``.
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -16,12 +15,7 @@ from pyrogram.errors import BadRequest, FloodWait, MessageIdInvalid, RPCError
 
 
 async def send_report(client: Client, chat_id, message_id: int, reason: int, reason_text: str) -> bool:
-    """Send a report against a specific message.
-
-    The function re-raises FloodWait, BadRequest, and RPCError so upstream
-    loops can coordinate throttling and retries. MessageIdInvalid is treated
-    as a soft success, allowing workers to skip deleted messages gracefully.
-    """
+    """Send a report against a specific message."""
     try:
         await client.send_report(
             chat_id=chat_id, message_id=message_id, reason=int(reason), message=reason_text
@@ -41,12 +35,8 @@ async def send_report(client: Client, chat_id, message_id: int, reason: int, rea
 
 
 async def report_profile_photo(client: Client, entity_id, reason: int, reason_text: str) -> bool:
-    """Report a user profile, chat, or generic entity.
+    """Report a user profile, chat, or generic entity."""
 
-    The function delegates to ``client.send_report`` with ``message_id=None``
-    when available. FloodWait, BadRequest, and RPCError bubble up for callers
-    to manage shared backoff logic.
-    """
     try:
         await client.send_report(chat_id=entity_id, message_id=None, reason=int(reason), message=reason_text)
         return True
@@ -68,14 +58,7 @@ async def bulk_report_messages(
     concurrency: int = 5,
     retry_on_flood: bool = True,
 ) -> dict[str, int]:
-    """Report multiple messages using multiple client sessions.
-
-    The helper fans out :func:`send_report` requests across the provided
-    ``clients`` with a concurrency limit. When a :class:`FloodWait` is raised,
-    the function optionally retries the request after sleeping for the advised
-    duration. Each task returns one of ``success`` or ``failed`` and the final
-    summary contains counts for both outcomes.
-    """
+    """Report multiple messages using multiple client sessions."""
 
     semaphore = asyncio.Semaphore(max(concurrency, 1))
 
