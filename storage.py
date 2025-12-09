@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
-from typing import Iterable, List, Optional
+from typing import Iterable
 
 try:  # pragma: no cover - optional dependency
     import motor.motor_asyncio as motor_asyncio
