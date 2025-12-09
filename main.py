@@ -66,12 +66,17 @@ def ensure_pyrogram_creds() -> None:
         raise RuntimeError("API_ID and API_HASH are required for Pyrogram sessions")
 
 
-def main_menu_keyboard() -> InlineKeyboardMarkup:
+def main_menu_keyboard(saved_sessions: int = 0, active_sessions: int = 0, live_status: str = "Live") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("Start report", callback_data="action:start")],
-            [InlineKeyboardButton("Add sessions", callback_data="action:add")],
-            [InlineKeyboardButton("Saved sessions", callback_data="action:sessions")],
+            [InlineKeyboardButton("🚀 Start report", callback_data="action:start")],
+            [InlineKeyboardButton("🧩 Add sessions", callback_data="action:add")],
+            [InlineKeyboardButton("💾 Saved sessions", callback_data="action:sessions")],
+            [
+                InlineKeyboardButton(f"🟢 {live_status} · Dark UI", callback_data="status:live"),
+                InlineKeyboardButton(f"🎯 Loaded: {active_sessions}", callback_data="status:active"),
+                InlineKeyboardButton(f"📦 Saved: {saved_sessions}", callback_data="status:saved"),
+            ],
         ]
     )
 
@@ -166,23 +171,33 @@ async def validate_sessions(api_id: int, api_hash: str, sessions: list[str]) -> 
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    saved_sessions = len(await data_store.get_sessions())
+    active_sessions = len(context.user_data.get("sessions", []))
+
     greeting = (
-        "👋 Welcome! This bot coordinates Pyrogram sessions to file Telegram reports.\n"
-        "• Start with your API ID + API Hash, then add 1-500 session strings.\n"
-        "• Share up to 5 URLs (private group, public group/channel, or profile/story).\n"
-        "• Choose a report type, add a short reason, and send 500-7000 reports (default 5000).\n"
-        "Use /report to begin or the panel below."
-    )
-    mockup = (
-        "🛠️ *Dark chat mockup reference*\n"
-        "• **User bubble:** Rounded charcoal gradient with crisp `/start` text tucked in the top-left.\n"
-        "• **Bot reply card:** A wide, soft-cornered box under the user bubble; add a subtle border/glow, title with an emoji, and roomy bullet spacing for the instructions.\n"
-        "• **Primary buttons:** Three stacked, pill-shaped buttons with bold labels—`Start report`, `Add sessions`, `Saved sessions`—spaced for finger taps.\n"
-        "• **Inline status bubbles:** Small chips below the buttons to show flow state, e.g. `🟢 Live · Sessions: 128`, `⚠️ Waiting for API ID`, `✅ Ready to report`."
+        "╭━━━━━━━✦ DARK MODE ONLINE ✦━━━━━━━╮\n"
+        "🤖 *Nightfall Reporter* — premium chat cockpit engaged.\n"
+        "╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n"
+        "🖤 Polished bubbles, elevated reply cards, and tactile pill buttons are live.\n"
+        "🌙 Start reporting instantly with saved creds or add new sessions on the fly.\n"
+        "✨ Dynamic status chips below keep you oriented as you move through each step.\n"
+        "\nTap a control to begin."
     )
 
-    await update.effective_message.reply_text(greeting, reply_markup=main_menu_keyboard())
-    await update.effective_message.reply_text(mockup, parse_mode=ParseMode.MARKDOWN)
+    steps_card = (
+        "*Quick launch*\n"
+        "• API ID + API Hash → validate sessions (1-500).\n"
+        "• Drop up to 5 targets (groups, channels, or profiles).\n"
+        "• Pick the reason, add a short message, and choose report volume.\n"
+        "• Watch live status updates as reports go out."
+    )
+
+    await update.effective_message.reply_text(
+        greeting,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=main_menu_keyboard(saved_sessions, active_sessions),
+    )
+    await update.effective_message.reply_text(steps_card, parse_mode=ParseMode.MARKDOWN)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -204,7 +219,7 @@ async def show_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     active = len(context.user_data.get("sessions", []))
     await update.effective_message.reply_text(
         f"Saved sessions: {saved}\nCurrently loaded for this chat: {active}",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(saved, active),
     )
 
 
@@ -221,10 +236,15 @@ async def handle_action_buttons(update: Update, context: ContextTypes.DEFAULT_TY
         active = len(context.user_data.get("sessions", []))
         await query.edit_message_text(
             f"Saved sessions: {saved}\nCurrently loaded for this chat: {active}",
-            reply_markup=main_menu_keyboard(),
+            reply_markup=main_menu_keyboard(saved, active),
         )
         return ConversationHandler.END
     return ConversationHandler.END
+
+
+async def handle_status_chip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer("Live status indicators — you are already in the dark UI.", show_alert=False)
 
 
 async def handle_session_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -237,7 +257,7 @@ async def handle_session_mode(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not saved_sessions:
             await query.edit_message_text(
                 friendly_error("No saved sessions available. Please add new sessions to continue."),
-                reply_markup=main_menu_keyboard(),
+                reply_markup=main_menu_keyboard(len(saved_sessions), len(context.user_data.get("sessions", []))),
             )
             return ConversationHandler.END
 
@@ -354,9 +374,10 @@ async def handle_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         context.user_data.get("api_id", 0), context.user_data.get("api_hash", ""), sessions
     )
     if not valid:
+        saved_count = len(await data_store.get_sessions())
         await update.effective_message.reply_text(
             friendly_error("No valid sessions were found. Please try again with fresh session strings."),
-            reply_markup=main_menu_keyboard(),
+            reply_markup=main_menu_keyboard(saved_count, len(context.user_data.get("sessions", []))),
         )
         return ConversationHandler.END
 
@@ -684,6 +705,7 @@ def build_app() -> Application:
     application.add_handler(CommandHandler("sessions", show_sessions))
     application.add_handler(add_sessions_conv)
     application.add_handler(report_conversation)
+    application.add_handler(CallbackQueryHandler(handle_status_chip, pattern=r"^status:"))
     application.add_handler(CallbackQueryHandler(handle_confirmation, pattern=r"^confirm:"))
 
     application.add_error_handler(error_handler)
