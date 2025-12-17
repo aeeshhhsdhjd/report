@@ -18,6 +18,13 @@ This project provides a Telegram bot that coordinates multiple Pyrogram session 
 - MongoDB connection string (optional but recommended for session persistence)
 - Dependencies from `requirements.txt`
 
+## Deploy to Heroku
+Use the one-click button after forking the repository (update `<your-username>` in the URL to match your GitHub handle):
+
+[![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/<your-username>/Reaction)
+
+The `app.json` file configures the worker process and required config vars so Heroku can provision the app automatically.
+
 ## Environment variables
 Set these before running the bot (or edit `config.py` to source them another way):
 
@@ -75,11 +82,8 @@ python main.py
 ## Running on Heroku
 1. Create a Heroku app and attach a MongoDB add-on (optional but recommended).
 2. Set Config Vars: `BOT_TOKEN`, `API_ID`, `API_HASH`, and `MONGO_URI` (if available).
-3. Add a `Procfile` entry like:
-   ```
-   worker: python main.py
-   ```
-4. Deploy the repository. Scale the worker dyno: `heroku ps:scale worker=1`.
+3. Deploy the repository (the included `Procfile` already defines the worker dyno: `worker: python main.py`).
+4. Scale the worker dyno: `heroku ps:scale worker=1`.
 
 ## Bot commands
 - `/start` – open the control panel.

@@ -1,0 +1,31 @@
+{
+  "name": "Reaction Reporter Bot",
+  "description": "Telegram reporting bot using Pyrogram with multi-session support and guided inline UI.",
+  "keywords": ["telegram", "bot", "pyrogram", "report", "heroku"],
+  "repository": "https://github.com/<your-username>/Reaction",
+  "env": {
+    "BOT_TOKEN": {
+      "description": "Telegram bot token from @BotFather.",
+      "required": true
+    },
+    "API_ID": {
+      "description": "Default Telegram API ID (used if the user does not supply one in /report).",
+      "required": true
+    },
+    "API_HASH": {
+      "description": "Default Telegram API Hash (used if the user does not supply one in /report).",
+      "required": true
+    },
+    "MONGO_URI": {
+      "description": "MongoDB connection string for persisting session strings (leave empty to use in-memory storage).",
+      "required": false
+    }
+  },
+  "formation": {
+    "worker": {
+      "quantity": 1,
+      "size": "free"
+    }
+  },
+  "stack": "heroku-22"
+}
