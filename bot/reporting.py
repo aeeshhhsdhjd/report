@@ -4,6 +4,7 @@ import asyncio
 import logging
 from copy import deepcopy
 from datetime import datetime, timezone
+from html import escape as html_escape
 from typing import TYPE_CHECKING, Iterable, Callable, Awaitable
 
 import config
@@ -80,9 +81,15 @@ async def run_report_job(query, context: ContextTypes.DEFAULT_TYPE, job_data: di
             started = datetime.now(timezone.utc)
 
             async def _update_status(payload: dict) -> None:
+                """
+                IMPORTANT:
+                - Telegram MARKDOWN is very strict and breaks when dynamic text contains _, *, [, ], (, ), etc.
+                - Use HTML parse mode + escape dynamic parts to prevent:
+                  "Can't parse entities: can't find end of the entity..."
+                """
                 sections: list[str] = []
 
-                setup_lines = ["**Setup**"]
+                setup_lines = ["<b>Setup</b>"]
                 join_state = payload.get("join", {})
                 if join_state:
                     join_completed = join_state.get("completed")
@@ -90,25 +97,27 @@ async def run_report_job(query, context: ContextTypes.DEFAULT_TYPE, job_data: di
                     join_status = "✅" if join_completed and join_errors == 0 else "⚠️" if join_completed else "⏳"
                     status_label = "all clients joined" if join_errors == 0 else "join attempts"
                     setup_lines.append(
-                        f"- join: {join_status} {status_label} ({join_state.get('joined', 0)}/{join_state.get('total', 0)})"
+                        f"- join: {join_status} {html_escape(status_label)} "
+                        f"({join_state.get('joined', 0)}/{join_state.get('total', 0)})"
                     )
                     last_join_reason = join_state.get("last_reason")
                     if last_join_reason:
-                        setup_lines.append(f"  last: {last_join_reason}")
+                        setup_lines.append(f"  last: {html_escape(str(last_join_reason))}")
 
                 target_state = payload.get("target", {})
                 if target_state:
                     validated = target_state.get("validated")
                     setup_lines.append(
-                        f"- target: {'✅' if validated else '⏳'} {target_state.get('summary', 'validating…')}"
+                        f"- target: {'✅' if validated else '⏳'} "
+                        f"{html_escape(str(target_state.get('summary', 'validating…')))}"
                     )
                     if target_state.get("error"):
-                        setup_lines.append(f"  error: {target_state['error']}")
+                        setup_lines.append(f"  error: {html_escape(str(target_state['error']))}")
 
                 sections.append("\n".join(setup_lines))
 
                 report_state = payload.get("report", {})
-                report_lines = ["\n**Reporting**"]
+                report_lines = ["", "<b>Reporting</b>"]
                 if report_state:
                     report_lines.append(
                         f"- total reports: ✅ {report_state.get('success', 0)} | ❌ {report_state.get('failed', 0)}"
@@ -121,16 +130,21 @@ async def run_report_job(query, context: ContextTypes.DEFAULT_TYPE, job_data: di
                         if retry:
                             detail += f" (retry in {int(retry)}s)"
                         if reason:
-                            detail += f": {reason}"
+                            detail += f": {html_escape(str(reason))}"
                         report_lines.append(
-                            f"- {client_label}: {detail} (count={info.get('success', 0)})"
+                            f"- {html_escape(str(client_label))}: {detail} (count={info.get('success', 0)})"
                         )
 
                 sections.append("\n".join(report_lines))
 
                 text = "\n".join(sections)
+
                 try:
-                    await status_message.edit_text(text, parse_mode=ParseMode.MARKDOWN)
+                    await status_message.edit_text(
+                        text,
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True,
+                    )
                 except Exception:
                     logging.exception("Failed to update status message")
 
@@ -373,20 +387,26 @@ async def perform_reporting(
                         if join_result.ok:
                             joined += 1
                             joined_clients.append(client)
-                            join_progress[client.name].update({"status": "SUCCESS", "success": 1, "reason": join_result.reason})
+                            join_progress[client.name].update(
+                                {"status": "SUCCESS", "success": 1, "reason": join_result.reason}
+                            )
                             break
                         join_progress[client.name].update({"status": "FAILED", "reason": join_result.reason})
                         if attempts >= max_join_attempts:
                             break
                     except Exception as exc:  # noqa: BLE001
                         code, detail, wait_seconds = map_pyrogram_error(exc)
-                        join_progress[client.name].update({"status": code, "reason": detail, "retry_after": wait_seconds})
+                        join_progress[client.name].update(
+                            {"status": code, "reason": detail, "retry_after": wait_seconds}
+                        )
                         await _push_status(
                             {
                                 "join": {
                                     "total": join_total,
                                     "joined": joined,
-                                    "errors": len([c for c in join_progress.values() if c.get("status") not in {"SUCCESS", "JOINING"}]),
+                                    "errors": len(
+                                        [c for c in join_progress.values() if c.get("status") not in {"SUCCESS", "JOINING"}]
+                                    ),
                                     "last_reason": f"{code}: {detail}",
                                 },
                                 "report": {"clients": join_progress},
@@ -423,13 +443,13 @@ async def perform_reporting(
                 }
 
         resolved_chat_id: int | None = None
-        target_details: dict | None = None
-        fatal_resolution_error: str | None = None
 
         if target_spec.kind not in {"message", "internal_message"}:
             return {"success": 0, "failed": 0, "halted": True, "error": "NOT_SUPPORTED: only message links"}
 
-        await _push_status({"target": {"validated": False, "summary": "validating target"}, "report": {"clients": join_progress}})
+        await _push_status(
+            {"target": {"validated": False, "summary": "validating target"}, "report": {"clients": join_progress}}
+        )
 
         try:
             primary = clients[0]
@@ -467,7 +487,7 @@ async def perform_reporting(
                 {"target": {"validated": False, "summary": "target validation failed", "error": f"{code}: {detail}"}}
             )
             return {"success": 0, "failed": 0, "halted": True, "error": f"{code}: {detail}"}
-    
+
         if target_spec.requires_join:
             for client in clients:
                 join_result = await ensure_join_if_needed(client, target_spec)
@@ -490,7 +510,9 @@ async def perform_reporting(
         async def report_once(client: Client) -> bool:
             nonlocal halted
             try:
-                chat, access_error = await resolve_chat_safe(client, resolved_chat_id, invite_link=target_spec.invite_link)
+                chat, access_error = await resolve_chat_safe(
+                    client, resolved_chat_id, invite_link=target_spec.invite_link
+                )
                 if chat is None:
                     status = (access_error or {}).get("status")
                     detail = (access_error or {}).get("detail")
@@ -503,7 +525,9 @@ async def perform_reporting(
                     )
                     return False
 
-                result = await report_profile_photo(client, resolved_chat_id, reason=reason_code, reason_text=reason_text)
+                result = await report_profile_photo(
+                    client, resolved_chat_id, reason=reason_code, reason_text=reason_text
+                )
                 if result:
                     client_progress[client.name]["success"] += 1
                     client_progress[client.name]["status"] = "SUCCESS"
@@ -585,12 +609,17 @@ async def perform_reporting(
                 except Exception as exc:  # noqa: BLE001
                     failed += 1
                     code, detail, retry_after = map_pyrogram_error(exc)
-                    client_progress[client.name].update({"status": code, "reason": detail, "retry_after": retry_after})
+                    client_progress[client.name].update(
+                        {"status": code, "reason": detail, "retry_after": retry_after}
+                    )
                     logging.exception("Unexpected error while reporting via %s", getattr(client, "name", "unknown"))
                 finally:
                     await _push_status(
                         {
-                            "target": {"validated": True, "summary": f"chat: {resolved_chat_id}, msg_id: {target_spec.message_id}"},
+                            "target": {
+                                "validated": True,
+                                "summary": f"chat: {resolved_chat_id}, msg_id: {target_spec.message_id}",
+                            },
                             "report": {
                                 "success": success,
                                 "failed": failed,
