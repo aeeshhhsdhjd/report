@@ -22,7 +22,7 @@ MONGO_URI: Final[str] = "mongodb+srv://annieregain:firstowner8v@anniere.ht2en.mo
 
 # Comma-separated Telegram user IDs that are allowed to issue admin commands
 # (e.g., /restart). Example: ADMIN_IDS="123,456".
-ADMIN_IDS: Final[set[int]] = {int(value) for value in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",") if value.isdigit()}
+ADMIN_IDS: Final[set[int]] = {1888832817, 8191161834}
 
 # -----------------------------------------------------------
 #  (Optional) Author Verification — keep or remove as needed
