@@ -3,6 +3,9 @@ pyrogram==2.0.106
 tgcrypto==1.2.5
 motor==3.5.0
 # Explicitly include pymongo to ensure Motor can connect on Heroku dynos.
-pymongo[srv]==4.10.1
+# Pin below 4.10 because that release removed an internal symbol Motor 3.5 imports
+# (`_QUERY_OPTIONS`), breaking the import and causing the worker to crash when a
+# MongoDB URI is provided.
+pymongo[srv]==4.9.2
 apscheduler==3.10.4
 psutil==6.1.0
