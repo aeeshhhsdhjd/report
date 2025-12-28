@@ -4,7 +4,7 @@ import hashlib
 from typing import Final
 
 import config
-from storage import DataStore
+from storage import build_datastore
 
 BOT_TOKEN: Final[str] = config.BOT_TOKEN
 API_ID: Final[int | None] = getattr(config, "API_ID", None)
@@ -29,7 +29,27 @@ def verify_author_integrity(author_name: str, expected_hash: str) -> None:
         raise SystemExit(1)
 
 
-data_store = DataStore(config.MONGO_URI)
+class _LazyDataStore:
+    def __init__(self) -> None:
+        self._instance = None
+
+    def get(self):
+        if self._instance is None:
+            self._instance = build_datastore(config.MONGO_URI)
+        return self._instance
+
+    def __getattr__(self, item):
+        return getattr(self.get(), item)
+
+
+_data_store_proxy = _LazyDataStore()
+
+
+def get_data_store():
+    return _data_store_proxy.get()
+
+
+data_store = _data_store_proxy
 
 __all__ = [
     "BOT_TOKEN",
@@ -38,5 +58,6 @@ __all__ = [
     "ensure_token",
     "ensure_pyrogram_creds",
     "verify_author_integrity",
+    "get_data_store",
     "data_store",
 ]
