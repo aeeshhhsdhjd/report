@@ -65,16 +65,29 @@ def render_card(
     return "\n".join(lines)
 
 
-def _with_restart_row(rows: list[list[InlineKeyboardButton]]) -> InlineKeyboardMarkup:
-    rows = [list(r) for r in rows]
-    rows.append([InlineKeyboardButton("🔄 Restart", callback_data="restart")])
-    return InlineKeyboardMarkup(rows)
+def _stack_rows(buttons: list[InlineKeyboardButton]) -> list[list[InlineKeyboardButton]]:
+    if not buttons:
+        return []
+
+    if len(buttons) == 1:
+        return [[buttons[0]]]
+
+    stacked_rows: list[list[InlineKeyboardButton]] = [[button] for button in buttons[:-2]]
+    stacked_rows.append([buttons[-2], buttons[-1]])
+    return stacked_rows
+
+
+def _with_restart_row(buttons: list[InlineKeyboardButton]) -> InlineKeyboardMarkup:
+    ordered_buttons = list(buttons) + [InlineKeyboardButton("🔄 Restart", callback_data="restart")]
+    return InlineKeyboardMarkup(_stack_rows(ordered_buttons))
 
 
 def add_restart_button(markup: InlineKeyboardMarkup | None) -> InlineKeyboardMarkup:
     if markup is None:
         return _with_restart_row([])
-    return _with_restart_row(markup.inline_keyboard)
+
+    existing_buttons = [button for row in markup.inline_keyboard for button in row]
+    return _with_restart_row(existing_buttons)
 
 
 def report_again_keyboard() -> InlineKeyboardMarkup:
@@ -100,58 +113,48 @@ def main_menu_keyboard(
     saved_sessions = max(0, min(int(saved_sessions), int(MAX_SESSIONS)))
     active_sessions = max(0, int(active_sessions))
 
-    return _with_restart_row(
-        [
-            [InlineKeyboardButton("▶ Start Report", callback_data="action:start")],
-            [
-                InlineKeyboardButton("➕ Add Sessions", callback_data="action:add"),
-                InlineKeyboardButton("💾 Saved Sessions", callback_data="action:sessions"),
-            ],
-            [InlineKeyboardButton("ℹ️ Help", callback_data="action:help")],
-            [
-                InlineKeyboardButton(f"🟢 Status: {live_status}", callback_data="status:live"),
-                InlineKeyboardButton(f"🎯 Loaded: {active_sessions}", callback_data="status:active"),
-                InlineKeyboardButton(f"📦 Saved: {saved_sessions}", callback_data="status:saved"),
-            ],
-        ]
-    )
+    buttons = [
+        InlineKeyboardButton("▶ Start Report", callback_data="action:start"),
+        InlineKeyboardButton("➕ Add Sessions", callback_data="action:add"),
+        InlineKeyboardButton("💾 Saved Sessions", callback_data="action:sessions"),
+        InlineKeyboardButton("ℹ️ Help", callback_data="action:help"),
+        InlineKeyboardButton(f"🟢 Status: {live_status}", callback_data="status:live"),
+        InlineKeyboardButton(f"🎯 Loaded: {active_sessions}", callback_data="status:active"),
+        InlineKeyboardButton(f"📦 Saved: {saved_sessions}", callback_data="status:saved"),
+    ]
+
+    return _with_restart_row(buttons)
 
 
 def target_kind_keyboard() -> InlineKeyboardMarkup:
-    return _with_restart_row(
-        [
-            [InlineKeyboardButton("🔒 Private Channel / Group", callback_data="kind:private")],
-            [InlineKeyboardButton("🌐 Public Channel / Group", callback_data="kind:public")],
-            [InlineKeyboardButton("📎 Story URL (Profile)", callback_data="kind:story")],
-        ]
-    )
+    buttons = [
+        InlineKeyboardButton("🔒 Private Channel / Group", callback_data="kind:private"),
+        InlineKeyboardButton("🌐 Public Channel / Group", callback_data="kind:public"),
+        InlineKeyboardButton("📎 Story URL (Profile)", callback_data="kind:story"),
+    ]
+
+    return _with_restart_row(buttons)
 
 
 def reason_keyboard() -> InlineKeyboardMarkup:
     """Buttons covering the available Pyrogram/Telegram report reasons."""
     # Keep your original callback mapping/order (0,3,2,1,6,4,5)
     order = [0, 3, 2, 1, 6, 4, 5]
-    buttons = [
+    reason_buttons = [
         InlineKeyboardButton(REASON_LABELS[i], callback_data=f"reason:{i}")
         for i in order
     ]
 
-    rows = [
-        buttons[0:2],
-        buttons[2:4],
-        buttons[4:6],
-        buttons[6:7],
-    ]
-    return _with_restart_row(rows)
+    return _with_restart_row(reason_buttons)
 
 
 def session_mode_keyboard() -> InlineKeyboardMarkup:
-    return _with_restart_row(
-        [
-            [InlineKeyboardButton("Use Saved Sessions", callback_data="session_mode:reuse")],
-            [InlineKeyboardButton("Add New Sessions", callback_data="session_mode:new")],
-        ]
-    )
+    buttons = [
+        InlineKeyboardButton("Use Saved Sessions", callback_data="session_mode:reuse"),
+        InlineKeyboardButton("Add New Sessions", callback_data="session_mode:new"),
+    ]
+
+    return _with_restart_row(buttons)
 
 
 def render_greeting() -> str:
