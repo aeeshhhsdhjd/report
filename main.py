@@ -15,7 +15,7 @@ import sys
 
 import config
 from bot.app_builder import build_app, run_polling
-from bot.dependencies import data_store, verify_author_integrity
+from bot.dependencies import get_data_store, verify_author_integrity
 from bot.logging_utils import build_logger
 from bot.scheduler import SchedulerManager, log_heartbeat
 
@@ -46,7 +46,9 @@ async def main_async() -> None:
     verify_author_integrity(config.AUTHOR_NAME, config.AUTHOR_HASH)
     build_logger()
 
-    if data_store.is_persistent:
+    store = get_data_store()
+
+    if store.is_persistent:
         logging.info("MongoDB persistence enabled; sessions and reports will survive dyno restarts.")
     else:
         logging.info(
@@ -67,7 +69,7 @@ async def main_async() -> None:
         await run_polling(app, shutdown_event)
     finally:
         SchedulerManager.shutdown()
-        await data_store.close()
+        await store.close()
 
     if app.bot_data.get("restart_requested"):
         _restart_process()
