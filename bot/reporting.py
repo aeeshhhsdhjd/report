@@ -360,6 +360,7 @@ async def perform_reporting(
 
     try:
         valid_sessions, invalid_sessions = await validate_sessions(api_id, api_hash, sessions_to_use)
+        invalid_sessions = set(invalid_sessions)
     except Exception:
         valid_sessions, invalid_sessions = sessions_to_use, set()
 
