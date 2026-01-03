@@ -60,10 +60,16 @@ ADMIN_IDS: Final[set[int]] = (
 )
 
 # Bot owner and optional sudo users (reporters) for role-based access.
-OWNER_ID: Final[int | None] = int(os.getenv("OWNER_ID", "1888832817")) or None
-SUDO_USERS: Final[set[int]] = {
-    int(item) for item in os.getenv("SUDO_USERS", "8191161834").split(",") if item.strip().isdigit()
-}
+OWNER_ID: Final[int | None] = int(os.getenv("OWNER_ID", 0)) or 1888832817
+
+SUDO_USERS: Final[set[int]] = (
+    {
+        int(item)
+        for item in os.getenv("SUDO_USERS", "").split(",")
+        if item.strip().isdigit()
+    }
+    or {8191161834}
+)
 
 # -----------------------------------------------------------
 #  (Optional) Author Verification — keep or remove as needed
