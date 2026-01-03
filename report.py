@@ -73,15 +73,21 @@ async def _resolve_peer_for_report(client: Client, chat_id):
     if hasattr(chat_id, "write"):
         return chat_id
 
+    # Allow numeric strings so callers can pass ``-100…`` chat IDs directly
+    # without hitting the username resolution fallback below.
+    if isinstance(chat_id, str) and chat_id.lstrip("-+").isdigit():
+        chat_id = int(chat_id)
+
     try:
         peer = client.resolve_peer(chat_id) if hasattr(client, "resolve_peer") else chat_id
         return await peer if asyncio.iscoroutine(peer) else peer
     except UsernameInvalid:
+        # Continue to raw username resolution below
         pass
     except Exception:
-        # Fallback to raw resolution only when the built-in resolver fails; the
-        # raw call can still raise and is handled by the caller.
-        pass
+        # For non-username inputs we want to bubble up the original error
+        # instead of masking it with a generic "Unable to resolve" message.
+        raise
 
     username = str(chat_id).lstrip("@")
     try:
