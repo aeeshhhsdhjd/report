@@ -15,28 +15,29 @@ import os
 from typing import Final
 
 # -----------------------------------------------------------
-#  Environment-based configuration (no baked-in secrets)
+#  Environment-based configuration helpers
 # -----------------------------------------------------------
 
-
 def _text_env(name: str) -> str | None:
-    """Return a non-empty environment variable or ``None``."""
-
+    """Return a non-empty environment variable or None."""
     value = os.getenv(name, "").strip()
     return value or None
 
 
 def _int_env(name: str) -> int | None:
     """Return an integer environment variable or raise a helpful error."""
-
     value = os.getenv(name, "").strip()
     if not value:
         return None
     try:
         return int(value)
-    except ValueError as exc:  # pragma: no cover - defensive guard
+    except ValueError as exc:
         raise RuntimeError(f"{name} must be an integer; got {value!r}.") from exc
 
+
+# -----------------------------------------------------------
+#  Core credentials
+# -----------------------------------------------------------
 
 BOT_TOKEN: Final[str | None] = _text_env("BOT_TOKEN")
 API_ID: Final[int | None] = _int_env("API_ID")
@@ -44,12 +45,20 @@ API_HASH: Final[str | None] = _text_env("API_HASH")
 
 MONGO_URI: Final[str | None] = _text_env("MONGO_URI")
 
+# -----------------------------------------------------------
+#  Telegram group configuration
+# -----------------------------------------------------------
+
 # Optional defaults for group ids; runtime changes are persisted separately.
 SESSION_GROUP_ID: Final[int | None] = _int_env("SESSION_GROUP_ID") or -1003576432902
 LOGS_GROUP_ID: Final[int | None] = _int_env("LOGS_GROUP_ID") or -1003647207401
 
+# -----------------------------------------------------------
+#  Access control
+# -----------------------------------------------------------
+
 # Comma-separated Telegram user IDs that are allowed to issue admin commands
-# (e.g., /restart). Example: ADMIN_IDS="123,456".
+# (e.g., /restart). Example: ADMIN_IDS="123,456"
 ADMIN_IDS: Final[set[int]] = (
     {
         int(item)
@@ -59,11 +68,11 @@ ADMIN_IDS: Final[set[int]] = (
     or {1888832817, 8191161834}
 )
 
-# Bot owner and optional sudo users (reporters) for role-based access.
-# Primary authority for the bot. This id is not overridden by environment
-# variables to prevent accidental privilege changes at runtime.
-OWNER_ID: Final[int] = 123456789
+# Primary authority for the bot.
+# This value is intentionally hard-coded to avoid accidental privilege changes.
+OWNER_ID: Final[int] = 1888832817
 
+# Optional sudo users (reporters / helpers)
 SUDO_USERS: Final[set[int]] = (
     {
         int(item)
@@ -74,7 +83,7 @@ SUDO_USERS: Final[set[int]] = (
 )
 
 # -----------------------------------------------------------
-#  (Optional) Author Verification — keep or remove as needed
+#  (Optional) Author verification
 # -----------------------------------------------------------
 
 AUTHOR_NAME: Final[str] = "oxeign"
