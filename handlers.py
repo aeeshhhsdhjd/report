@@ -14,7 +14,7 @@ from typing import Callable, Tuple
 
 from pyrogram import Client, filters
 from pyrogram.enums import ChatMemberStatus
-from pyrogram.errors import RPCError
+from pyrogram.errors import FloodWait, RPCError, UserAlreadyParticipant
 from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 import config
@@ -862,18 +862,33 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
                     ok = await send_report(
                         client, chat_ref, msg_id, reason_code, reason_text
                     )
+                except FloodWait as fw:
+                    delay = getattr(fw, "value", 1)
+                    _record_failure(f"Flood wait {delay}s; retrying once")
+                    await asyncio.sleep(delay)
+                    try:
+                        ok = await send_report(
+                            client, chat_ref, msg_id, reason_code, reason_text
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        ok = False
+                        failure_count += 1
+                        _record_failure(exc)
+                except RPCError as exc:
+                    ok = False
+                    failure_count += 1
+                    _record_failure(exc)
+                except Exception as exc:  # noqa: BLE001
+                    ok = False
+                    failure_count += 1
+                    _record_failure(exc)
+                else:
                     if ok:
                         success_any = True
                         success_count += 1
                     else:
                         failure_count += 1
                         _record_failure("Send report call returned unsuccessful")
-                except RPCError as exc:
-                    failure_count += 1
-                    _record_failure(exc)
-                except Exception as exc:  # noqa: BLE001
-                    failure_count += 1
-                    _record_failure(exc)
                 await asyncio.sleep(1.5)
             finally:
                 attempted += 1
@@ -931,6 +946,8 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
                 await client.join_chat(target)
                 joined += 1
                 await asyncio.sleep(1)
+            except UserAlreadyParticipant:
+                already_joined += 1
             except RPCError as exc:
                 failed += 1
                 failure_reasons.append(
