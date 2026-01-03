@@ -8,6 +8,7 @@ from time import monotonic
 from typing import Callable, Tuple
 
 from pyrogram import Client, filters
+from pyrogram.enums import ChatMemberStatus
 from pyrogram.errors import RPCError
 from pyrogram.types import CallbackQuery, Message
 
@@ -27,7 +28,13 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
         try:
             me = await app.get_me()
             member = await app.get_chat_member(chat_id, me.id)
-            return getattr(member, "status", "") in {"administrator", "creator"}
+            status = getattr(member, "status", "")
+            return status in {
+                ChatMemberStatus.ADMINISTRATOR,
+                ChatMemberStatus.OWNER,
+                "administrator",
+                "creator",
+            }
         except Exception:
             return False
 
