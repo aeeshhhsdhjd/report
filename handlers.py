@@ -420,10 +420,13 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
 
     async def _handle_session_ingestion(message: Message) -> None:
         session_group = await persistence.get_session_group_id()
-        if not session_group or message.chat.id != session_group:
+        print(f"🔍 [DEBUG] session_group={session_group}, chat.id={message.chat.id}")
+        if message.chat.id != session_group:
             return
         if not message.from_user or not is_owner(message.from_user.id):
             return
+
+        await message.reply_text("📥 Bot received your message.")
 
         text_content = message.text or message.caption or ""
         sessions = extract_sessions_from_text(text_content)
@@ -431,10 +434,7 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
             await message.reply_text("❌ Invalid session string.")
             return
 
-        logs_group = await persistence.get_logs_group_id()
-
-        valid_count = 0
-        invalid_count = 0
+        valid_count, invalid_count = 0, 0
 
         for session in sessions:
             if await validate_session_string(session):
@@ -443,19 +443,11 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
             else:
                 invalid_count += 1
 
-        total_sessions = len(await persistence.get_sessions())
-
         if valid_count:
-            await message.reply_text(
-                f"✅ Session saved.\n📦 Total valid sessions: {total_sessions}"
-            )
-            await send_log(
-                app,
-                logs_group,
-                f"{valid_count} session(s) added from the session manager group.",
-            )
+            total = len(await persistence.get_sessions())
+            await message.reply_text(f"✅ Session saved.\n📦 Total valid sessions: {total}")
         if invalid_count:
-            await message.reply_text("❌ Invalid session string.")
+            await message.reply_text("❌ Some session(s) were invalid.")
 
     @app.on_callback_query(filters.regex(r"^owner:(manage|set_session_group|set_logs_group)$"))
     async def owner_actions(_: Client, query: CallbackQuery) -> None:
