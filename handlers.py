@@ -1,4 +1,3 @@
-# handlers.py
 from __future__ import annotations
 
 """Command and callback handlers for the reporting bot."""
@@ -67,7 +66,7 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
         await send_log(
             app,
             await persistence.get_logs_group_id(),
-            f"ð° {stage}\n{detail}",
+            f"🛰 {stage}\n{detail}",
         )
 
     async def _is_sudo_user(user_id: int | None) -> bool:
@@ -160,23 +159,6 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
         await message.reply_text(f"Removed {user_id} from sudo users.")
         await _log_stage("Sudo Removed", f"Owner removed {user_id}")
 
-    @app.on_message(filters.command("sudolist"))
-    async def sudo_list(_: Client, message: Message) -> None:
-        await _wrap_errors(_handle_sudo_list, message)
-
-    async def _handle_sudo_list(message: Message) -> None:
-        if not await _owner_guard(message):
-            return
-
-        sudo_users = sorted(await persistence.get_sudo_users())
-        if not sudo_users:
-            await message.reply_text("No sudo users configured.")
-            return
-
-        entries = [f"- {user_id}" for user_id in sudo_users]
-        text = "Current sudo users:\n" + "\n".join(entries)
-        await message.reply_text(text)
-
     @app.on_callback_query(filters.regex(r"^sudo:start$"))
     async def start_report(_: Client, query: CallbackQuery) -> None:
         await _wrap_errors(_handle_start_report, query)
@@ -251,7 +233,6 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
         state.stage = "awaiting_count"
         await query.message.reply_text("How many reports do you want to send?")
 
-    # IMPORTANT: Report flow is expected in DM, not groups.
     @app.on_message(filters.private & filters.text & ~filters.command(["start", "broadcast", "set_session", "set_log"]))
     async def text_router(_: Client, message: Message) -> None:
         await _wrap_errors(_handle_text, message)
@@ -281,11 +262,12 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
                 if count <= 0:
                     raise ValueError()
                 state.report_count = count
-                await message.reply_text(f"â Will send {count} reports.")
+                await message.reply_text(f"✅ Will send {count} reports.")
                 await _begin_report(message, state)
             except ValueError:
                 await message.reply_text("Please enter a valid number of reports (e.g., 10).")
             return
+
         if state.stage == "awaiting_reason":
             state.reason_text = (message.text or "").strip()
             state.reason_code = 9
@@ -309,7 +291,7 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
         state.started_at = monotonic()
 
         if queue.is_busy() and queue.active_user != message.from_user.id:
-            await message.reply_text("â³ Please wait while another report is in progress.")
+            await message.reply_text("⏳ Please wait while another report is in progress.")
             notice = queued_message(queue.expected_position(message.from_user.id))
             if notice:
                 await message.reply_text(notice)
@@ -334,7 +316,7 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
         try:
             success = await _execute_report(message, state)
             elapsed = monotonic() - state.started_at
-            status = "Success" if success else "â Failed"
+            status = "Success" if success else "❌ Failed"
             await message.reply_text(f"Report completed. Status: {status}")
             await persistence.record_report(
                 {
@@ -404,158 +386,8 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
                     await client.stop()
         return success_any
 
-    @app.on_message(filters.command("set_session") & filters.group)
-    async def set_session(_: Client, message: Message) -> None:
-        await _wrap_errors(_handle_set_session, message)
-
-    async def _handle_set_session(message: Message) -> None:
-        if not message.from_user or not is_owner(message.from_user.id):
-            await message.reply_text("Only the owner can set the session manager group.")
-            return
-        await persistence.save_session_group_id(message.chat.id)
-        await persistence.add_known_chat(message.chat.id)
-        await message.reply_text("â Session group set.")
-        await _log_stage("Session Group Set", f"Session group updated to {message.chat.id}")
-
-        if not await _ensure_admin(message.chat.id):
-            await _log_stage(
-                "Warning",
-                "Bot is not admin in session group. If BotFather privacy is ON, bot may not receive session texts.",
-            )
-
-    @app.on_message(filters.command("set_log") & filters.group)
-    async def set_log(_: Client, message: Message) -> None:
-        await _wrap_errors(_handle_set_log, message)
-
-    async def _handle_set_log(message: Message) -> None:
-        if not message.from_user or not is_owner(message.from_user.id):
-            await message.reply_text("Only the owner can set the logs group.")
-            return
-        await persistence.save_logs_group_id(message.chat.id)
-        await persistence.add_known_chat(message.chat.id)
-        await message.reply_text("â Logs group set.")
-        await _log_stage("Logs Group Set", f"Logs group updated to {message.chat.id}")
-
-    @app.on_message(filters.command("broadcast"))
-    async def broadcast(_: Client, message: Message) -> None:
-        await _wrap_errors(_handle_broadcast, message)
-
-    async def _handle_broadcast(message: Message) -> None:
-        if not message.from_user or not is_owner(message.from_user.id):
-            return
-        logs_group = _normalize_chat_id(await persistence.get_logs_group_id())
-        if not logs_group or message.chat.id != logs_group:
-            return
-        payload = (message.text or "").split(" ", 1)
-        if len(payload) < 2:
-            await message.reply_text("Usage: /broadcast <message>")
-            return
-        text = payload[1]
-        chats = await persistence.known_chats()
-        user_count = 0
-        group_count = 0
-        start_time = monotonic()
-        for chat_id in chats:
-            try:
-                await app.send_message(chat_id, text)
-                if chat_id > 0:
-                    user_count += 1
-                else:
-                    group_count += 1
-            except Exception as exc:  # noqa: BLE001
-                print(f"[DEBUG] Broadcast failed for {chat_id}: {exc}")
-                continue
-        elapsed = round(monotonic() - start_time, 2)
-        summary = (
-            "ð¢ Broadcast sent to:\n"
-            f"ð¤ Users: {user_count}\n"
-            f"ð¥ Groups: {group_count}\n"
-            f"â± Time: {elapsed}s"
-        )
-        await send_log(app, logs_group, summary)
-        await message.reply_text(summary)
-
-    @app.on_message(filters.group & (filters.text | filters.caption | filters.document), group=-5)
-    async def session_ingestion(_: Client, message: Message) -> None:
-        await _wrap_errors(_handle_session_ingestion, message)
-
-    async def _read_document_text(message: Message) -> str:
-        if not message.document:
-            return ""
-        try:
-            bio = await message.download(in_memory=True)
-            if isinstance(bio, BytesIO):
-                return bio.getvalue().decode("utf-8", errors="ignore")
-            return ""
-        except Exception:
-            return ""
-
-    async def _handle_session_ingestion(message: Message) -> None:
-        session_group = _normalize_chat_id(await persistence.get_session_group_id())
-        if not session_group:
-            await _log_stage("Session Intake Skip", "Session group id not configured")
-            return
-        if message.chat.id != session_group:
-            return
-        if not message.from_user:
-            return
-        if not is_owner(message.from_user.id):
-            await _log_stage("Session Intake Denied", f"Non-owner {message.from_user.id} tried to add sessions")
-            return
-
-        text_content = message.text or message.caption or ""
-        if not text_content and message.document:
-            text_content = await _read_document_text(message)
-
-        sessions = extract_sessions_from_text(text_content)
-        if not sessions:
-            await message.reply("â Invalid")
-            await _log_stage("Session Intake", "No valid sessions found in message")
-            return
-
-        saved_any = False
-        invalid_any = False
-
-        for session in sessions:
-            if await validate_session_string(session):
-                try:
-                    await persistence.add_sessions([session], added_by=message.from_user.id)
-                    saved_any = True
-                except Exception as exc:  # noqa: BLE001
-                    invalid_any = True
-                    await _log_stage("Session Save Failed", f"{exc}")
-            else:
-                invalid_any = True
-
-        if saved_any and not invalid_any:
-            await message.reply("â Saved")
-        elif saved_any and invalid_any:
-            await message.reply("â ï¸ Partial: some saved, some invalid/failed")
-        else:
-            await message.reply("â Invalid")
-
-    @app.on_callback_query(filters.regex(r"^owner:(manage|set_session_group|set_logs_group)$"))
-    async def owner_actions(_: Client, query: CallbackQuery) -> None:
-        await _wrap_errors(_handle_owner_action, query)
-
-    async def _handle_owner_action(query: CallbackQuery) -> None:
-        if not query.from_user or not is_owner(query.from_user.id):
-            await query.answer("Owner only", show_alert=True)
-            return
-        await query.answer()
-        action = query.data.split(":")[-1]
-        if action == "manage":
-            sessions = await prune_sessions(persistence)
-            await query.message.reply_text(f"Total valid sessions: {len(sessions)}")
-        elif action == "set_session_group":
-            await query.message.reply_text("Run /set_session in the target session group where I am admin.")
-        elif action == "set_logs_group":
-            await query.message.reply_text("Run /set_log in the logs group where I am admin.")
-
-
 def _is_valid_link(link: str) -> bool:
     return link.startswith("https://t.me/")
-
 
 def _parse_link(link: str, is_private: bool) -> Tuple[str | int, int]:
     cleaned = link.replace("https://t.me/", "").strip("/")
@@ -564,7 +396,6 @@ def _parse_link(link: str, is_private: bool) -> Tuple[str | int, int]:
         raise ValueError("Invalid link")
 
     if is_private:
-        # Private links: t.me/c/<internal_id>/<message_id>
         if parts[0] == "c":
             if len(parts) < 3:
                 raise ValueError("Invalid private link")
