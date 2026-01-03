@@ -67,7 +67,7 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
         await send_log(
             app,
             await persistence.get_logs_group_id(),
-            f"🛰 {stage}\n{detail}",
+            f"ð° {stage}\n{detail}",
         )
 
     async def _is_sudo_user(user_id: int | None) -> bool:
@@ -248,7 +248,8 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
         state.reason_text = label
         await query.answer(f"Reason set to {label}")
         await _log_stage("Report Reason", f"User {query.from_user.id} selected {label}")
-        await _begin_report(query.message, state)
+        state.stage = "awaiting_count"
+        await query.message.reply_text("How many reports do you want to send?")
 
     # IMPORTANT: Report flow is expected in DM, not groups.
     @app.on_message(filters.private & filters.text & ~filters.command(["start", "broadcast", "set_session", "set_log"]))
@@ -274,6 +275,17 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
             await _log_stage("Target Link", f"User {message.from_user.id} provided link {state.target_link}")
             return
 
+        if state.stage == "awaiting_count":
+            try:
+                count = int(message.text.strip())
+                if count <= 0:
+                    raise ValueError()
+                state.report_count = count
+                await message.reply_text(f"â Will send {count} reports.")
+                await _begin_report(message, state)
+            except ValueError:
+                await message.reply_text("Please enter a valid number of reports (e.g., 10).")
+            return
         if state.stage == "awaiting_reason":
             state.reason_text = (message.text or "").strip()
             state.reason_code = 9
@@ -297,7 +309,7 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
         state.started_at = monotonic()
 
         if queue.is_busy() and queue.active_user != message.from_user.id:
-            await message.reply_text("⏳ Please wait while another report is in progress.")
+            await message.reply_text("â³ Please wait while another report is in progress.")
             notice = queued_message(queue.expected_position(message.from_user.id))
             if notice:
                 await message.reply_text(notice)
@@ -322,7 +334,7 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
         try:
             success = await _execute_report(message, state)
             elapsed = monotonic() - state.started_at
-            status = "Success" if success else "❌ Failed"
+            status = "Success" if success else "â Failed"
             await message.reply_text(f"Report completed. Status: {status}")
             await persistence.record_report(
                 {
@@ -370,7 +382,8 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
         reason_text = state.reason_text or "Report"
         success_any = False
 
-        for idx, session in enumerate(sessions):
+        count = state.report_count or 10
+        for idx, session in enumerate(sessions[:count]):
             client = Client(
                 name=f"report_{idx}",
                 api_id=config.API_ID,
@@ -401,7 +414,7 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
             return
         await persistence.save_session_group_id(message.chat.id)
         await persistence.add_known_chat(message.chat.id)
-        await message.reply_text("✅ Session group set.")
+        await message.reply_text("â Session group set.")
         await _log_stage("Session Group Set", f"Session group updated to {message.chat.id}")
 
         if not await _ensure_admin(message.chat.id):
@@ -420,7 +433,7 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
             return
         await persistence.save_logs_group_id(message.chat.id)
         await persistence.add_known_chat(message.chat.id)
-        await message.reply_text("✅ Logs group set.")
+        await message.reply_text("â Logs group set.")
         await _log_stage("Logs Group Set", f"Logs group updated to {message.chat.id}")
 
     @app.on_message(filters.command("broadcast"))
@@ -454,10 +467,10 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
                 continue
         elapsed = round(monotonic() - start_time, 2)
         summary = (
-            "📢 Broadcast sent to:\n"
-            f"👤 Users: {user_count}\n"
-            f"👥 Groups: {group_count}\n"
-            f"⏱ Time: {elapsed}s"
+            "ð¢ Broadcast sent to:\n"
+            f"ð¤ Users: {user_count}\n"
+            f"ð¥ Groups: {group_count}\n"
+            f"â± Time: {elapsed}s"
         )
         await send_log(app, logs_group, summary)
         await message.reply_text(summary)
@@ -496,7 +509,7 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
 
         sessions = extract_sessions_from_text(text_content)
         if not sessions:
-            await message.reply("❌ Invalid")
+            await message.reply("â Invalid")
             await _log_stage("Session Intake", "No valid sessions found in message")
             return
 
@@ -515,11 +528,11 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
                 invalid_any = True
 
         if saved_any and not invalid_any:
-            await message.reply("✅ Saved")
+            await message.reply("â Saved")
         elif saved_any and invalid_any:
-            await message.reply("⚠️ Partial: some saved, some invalid/failed")
+            await message.reply("â ï¸ Partial: some saved, some invalid/failed")
         else:
-            await message.reply("❌ Invalid")
+            await message.reply("â Invalid")
 
     @app.on_callback_query(filters.regex(r"^owner:(manage|set_session_group|set_logs_group)$"))
     async def owner_actions(_: Client, query: CallbackQuery) -> None:
