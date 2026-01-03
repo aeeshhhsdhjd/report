@@ -9,6 +9,7 @@ from typing import Iterable, Tuple
 from pyrogram import Client
 
 import config
+from bot.dependencies import ensure_pyrogram_creds, ensure_token
 from state import ReportQueue, StateManager
 from storage import build_datastore
 
@@ -67,6 +68,9 @@ def extract_sessions_from_text(text: str) -> list[str]:
 
 
 def create_bot() -> tuple[Client, object, StateManager, ReportQueue]:
+    ensure_token()
+    ensure_pyrogram_creds()
+
     persistence = build_datastore(config.MONGO_URI)
     queue = ReportQueue()
     states = StateManager()

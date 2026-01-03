@@ -2,26 +2,43 @@ from __future__ import annotations
 
 """Configuration helpers for the Reaction Reporter Bot.
 
-Fill the values below with your BOT TOKEN, API ID, API HASH, and MONGO URI
-before deploying. This avoids mistakes with environment variables.
+All sensitive values are sourced from environment variables. If required
+credentials are missing or malformed, the bot will exit early with a clear
+message instead of crashing later with a Telegram RPC error.
 """
 
 import os
 from typing import Final
 
 # -----------------------------------------------------------
-#  🔴 FILL THESE VALUES CAREFULLY BEFORE DEPLOYMENT
+#  Environment-based configuration (no baked-in secrets)
 # -----------------------------------------------------------
 
-BOT_TOKEN: Final[str] = os.getenv("BOT_TOKEN", "8549633097:AAGeb2iAfIHCiSQJn5uKUqN8IHr7vztl6bU")
 
-API_ID: Final[int | None] = int(os.getenv("API_ID", "27989579")) or None
-API_HASH: Final[str] = os.getenv("API_HASH", "64742ebe270a7d202150134d66397839")
+def _text_env(name: str) -> str | None:
+    """Return a non-empty environment variable or ``None``."""
 
-MONGO_URI: Final[str] = os.getenv(
-    "MONGO_URI",
-    "mongodb+srv://annieregain:firstowner8v@anniere.ht2en.mongodb.net/?retryWrites=true&w=majority&appName=AnnieRE",
-)
+    value = os.getenv(name, "").strip()
+    return value or None
+
+
+def _int_env(name: str) -> int | None:
+    """Return an integer environment variable or raise a helpful error."""
+
+    value = os.getenv(name, "").strip()
+    if not value:
+        return None
+    try:
+        return int(value)
+    except ValueError as exc:  # pragma: no cover - defensive guard
+        raise RuntimeError(f"{name} must be an integer; got {value!r}.") from exc
+
+
+BOT_TOKEN: Final[str | None] = _text_env("BOT_TOKEN")
+API_ID: Final[int | None] = _int_env("API_ID")
+API_HASH: Final[str | None] = _text_env("API_HASH")
+
+MONGO_URI: Final[str | None] = _text_env("MONGO_URI")
 
 # Comma-separated Telegram user IDs that are allowed to issue admin commands
 # (e.g., /restart). Example: ADMIN_IDS="123,456".
