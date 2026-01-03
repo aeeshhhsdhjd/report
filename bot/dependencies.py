@@ -13,13 +13,17 @@ API_HASH: Final[str | None] = getattr(config, "API_HASH", None)
 
 def ensure_token() -> str:
     if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN is required. Set it as an environment variable.")
+        raise RuntimeError(
+            "BOT_TOKEN is required. Set it via the BOT_TOKEN environment variable before starting the bot."
+        )
     return BOT_TOKEN
 
 
 def ensure_pyrogram_creds() -> None:
     if not (API_ID and API_HASH):
-        raise RuntimeError("API_ID and API_HASH are required for Pyrogram sessions")
+        raise RuntimeError(
+            "API_ID and API_HASH are required for Pyrogram sessions. Provide valid values via environment variables."
+        )
 
 
 def verify_author_integrity(author_name: str, expected_hash: str) -> None:

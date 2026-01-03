@@ -28,7 +28,9 @@ Use the one-click button after forking the repository (update `<your-username>` 
 The `app.json` file configures the worker process and required config vars so Heroku can provision the app automatically.
 
 ## Environment variables
-Set these before running the bot (or edit `config.py` to source them another way):
+Set these before running the bot (or edit `config.py` to source them another way).
+If any required value is missing or malformed, the bot will exit with a clear
+error instead of crashing later with a Telegram RPC failure:
 
 - `BOT_TOKEN`: Telegram bot token.
 - `API_ID`: Default Telegram API ID (used if the user does not provide one).
