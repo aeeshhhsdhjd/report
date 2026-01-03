@@ -46,7 +46,7 @@ MONGO_URI: Final[str | None] = _text_env("MONGO_URI")
 
 # Optional defaults for group ids; runtime changes are persisted separately.
 SESSION_GROUP_ID: Final[int | None] = _int_env("SESSION_GROUP_ID")
-LOGS_GROUP_ID: Final[int | None] = _int_env("LOGS_GROUP_ID")
+LOGS_GROUP_ID: Final[int | None] = _int_env("LOGS_GROUP_ID") or -1003647207401
 
 # Comma-separated Telegram user IDs that are allowed to issue admin commands
 # (e.g., /restart). Example: ADMIN_IDS="123,456".
