@@ -128,28 +128,50 @@ class DataStore:
 
     # ------------------- Config storage -------------------
     async def set_session_group(self, chat_id: int) -> None:
-        await self._set_config_value("session_group", chat_id)
+        await self.save_session_group_id(chat_id)
 
     async def save_session_group_id(self, chat_id: int) -> None:
-        await self.set_session_group(chat_id)
+        self._in_memory_config["session_group"] = chat_id
+        if self.db:
+            await self.db.config.update_one(
+                {"key": "session_group"},
+                {"$set": {"value": chat_id}},
+                upsert=True,
+            )
+
+        self._persist_snapshot()
 
     async def session_group(self) -> int | None:
-        return await self._get_config_value("session_group")
+        return await self.get_session_group_id()
 
     async def get_session_group_id(self) -> int | None:
-        return await self.session_group()
+        if self.db:
+            doc = await self.db.config.find_one({"key": "session_group"})
+            return doc["value"] if doc else self._in_memory_config.get("session_group")
+        return self._in_memory_config.get("session_group")
 
     async def set_logs_group(self, chat_id: int) -> None:
-        await self._set_config_value("logs_group", chat_id)
+        await self.save_logs_group_id(chat_id)
 
     async def save_logs_group_id(self, chat_id: int) -> None:
-        await self.set_logs_group(chat_id)
+        self._in_memory_config["logs_group"] = chat_id
+        if self.db:
+            await self.db.config.update_one(
+                {"key": "logs_group"},
+                {"$set": {"value": chat_id}},
+                upsert=True,
+            )
+
+        self._persist_snapshot()
 
     async def logs_group(self) -> int | None:
-        return await self._get_config_value("logs_group")
+        return await self.get_logs_group_id()
 
     async def get_logs_group_id(self) -> int | None:
-        return await self.logs_group()
+        if self.db:
+            doc = await self.db.config.find_one({"key": "logs_group"})
+            return doc["value"] if doc else self._in_memory_config.get("logs_group")
+        return self._in_memory_config.get("logs_group")
 
     async def _set_config_value(self, key: str, value: int | None) -> None:
         if self.db:
