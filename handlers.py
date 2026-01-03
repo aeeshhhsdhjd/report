@@ -56,15 +56,30 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
         await _wrap_errors(_handle_start, message)
 
     async def _handle_start(message: Message) -> None:
-        user_id = message.from_user.id if message.from_user else None
+        if not message.from_user:
+            return
+
+        user_id = message.from_user.id
         if not is_sudo(user_id):
-            await message.reply_text("You are unauthorised. Take sudo from owner to use this bot.")
+            await message.reply_text("This bot is for the owner and sudo users only. Contact the owner for access.")
             return
 
         await persistence.add_known_chat(message.chat.id)
         live_sessions = await prune_sessions(persistence)
+        session_group = await persistence.session_group()
 
         if is_owner(user_id):
+            if not live_sessions:
+                target_group_note = (
+                    f" (Session manager group: {session_group})" if session_group else ""
+                )
+                hint = (
+                    "Please send a Pyrogram session string in the session manager group to enable reporting."
+                    f"{target_group_note}"
+                )
+                await message.reply_text(hint)
+                return
+
             await message.reply_text(
                 f"Owner control panel\nLive sessions: {len(live_sessions)} available",
                 reply_markup=owner_panel(len(live_sessions)),
@@ -72,6 +87,9 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
             return
 
         await log_new_user(app, await persistence.logs_group(), message)
+        if not live_sessions:
+            await message.reply_text("No active sessions available. Contact the owner to add sessions in the session manager group.")
+            return
         await message.reply_text(
             f"Live sessions: {len(live_sessions)} available",
             reply_markup=sudo_panel(len(live_sessions)),
@@ -392,18 +410,32 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
         session_group = await persistence.session_group()
         if not session_group or message.chat.id != session_group:
             return
-        if not message.from_user or not is_owner(message.from_user.id):
+        if not message.from_user:
+            return
+        if not is_owner(message.from_user.id):
+            await message.reply_text("Only the owner can add or validate sessions in this group.")
             return
 
         sessions = extract_sessions_from_text(message.text or "")
         if not sessions:
+            await message.reply_text("No Pyrogram session strings found. Send a valid session to save.")
             return
         valid, invalid = await validate_sessions(sessions)
+        logs_group = await persistence.logs_group()
+        response_parts = []
         if valid:
             await persistence.add_sessions(valid, added_by=message.from_user.id)
-            await message.reply_text("Session string saved and activated automatically")
+            response_parts.append("Session string saved and activated automatically")
+            await send_log(
+                app,
+                logs_group,
+                f"{len(valid)} session(s) added from the session manager group.",
+            )
         if invalid:
-            await message.reply_text("Invalid session string")
+            response_parts.append("Invalid session string. Please resend a valid Pyrogram session.")
+            await send_log(app, logs_group, f"Ignored {len(invalid)} invalid session strings.")
+        if response_parts:
+            await message.reply_text("\n".join(response_parts))
 
     @app.on_callback_query(filters.regex(r"^owner:(manage|set_session_group|set_logs_group)$"))
     async def owner_actions(_: Client, query: CallbackQuery) -> None:
