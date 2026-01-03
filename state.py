@@ -18,7 +18,7 @@ class UserState:
     target_link: Optional[str] = None
     reason_code: Optional[int] = None
     reason_text: Optional[str] = None
-    report_count: Optional[int] = None  # 🔧 NEW: Number of reports
+    report_count: Optional[int] = None  # ✅ NEW: Number of reports user wants
     started_at: float = field(default_factory=monotonic)
 
     def reset(self) -> None:
@@ -27,7 +27,7 @@ class UserState:
         self.target_link = None
         self.reason_code = None
         self.reason_text = None
-        self.report_count = None  # 🔧 Clear report count
+        self.report_count = None  # ✅ Reset on new session
         self.started_at = monotonic()
 
 
@@ -74,7 +74,6 @@ class ReportQueue:
 
     def set_error_handler(self, handler: Callable[[Exception], Awaitable[None]]) -> None:
         """Register a coroutine to run when a queued job raises."""
-
         self._on_error = handler
 
     def expected_position(self, user_id: int) -> int:
@@ -97,7 +96,7 @@ class ReportQueue:
             self._active_user = entry.user_id
             try:
                 await entry.job()
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logging.exception("Queue worker error")
                 if self._on_error:
                     await self._on_error(exc)
