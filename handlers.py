@@ -502,10 +502,19 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
             return
 
         if state.stage == "awaiting_link":
-            if not _is_valid_link(message.text or ""):
+            link = (message.text or "").strip()
+            if not _is_valid_link(link):
                 await message.reply_text("Send a valid https://t.me/ link.")
                 return
-            state.target_link = (message.text or "").strip()
+            try:
+                _parse_link(link, state.report_type == "private")
+            except ValueError:
+                detail = "private" if state.report_type == "private" else "public"
+                await message.reply_text(
+                    f"The link is not a valid {detail} message link. Please send a correct t.me link."
+                )
+                return
+            state.target_link = link
             state.stage = "awaiting_reason"
             await message.reply_text("Choose a report reason", reply_markup=reason_keyboard())
             await _log_stage("Target Link", f"User {message.from_user.id} provided link {state.target_link}")
@@ -706,6 +715,7 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
 
         joined = 0
         failed = 0
+        already_joined = 0
         for idx, session in enumerate(sessions):
             client = Client(
                 name=f"joiner_{idx}",
@@ -716,6 +726,16 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
             )
             try:
                 await client.start()
+                try:
+                    member = await client.get_chat_member(target, "me")
+                    status = getattr(member, "status", "")
+                    if status not in {ChatMemberStatus.KICKED, "kicked", "left"}:
+                        already_joined += 1
+                        continue
+                except RPCError:
+                    # If the session cannot access the chat yet, fall back to joining.
+                    pass
+
                 await client.join_chat(target)
                 joined += 1
                 await asyncio.sleep(1)
@@ -727,13 +747,19 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
                 with contextlib.suppress(Exception):
                     await client.stop()
 
-        if joined:
+        if joined or already_joined:
+            total_ready = joined + already_joined
+            details = f"(joined: {joined}, already in: {already_joined}, failed: {failed})"
             await message.reply_text(
-                f"🤝 Joined the group/channel with {joined}/{len(sessions)} sessions."
+                f"🤝 Access confirmed for {total_ready}/{len(sessions)} sessions {details}."
             )
             await _log_stage(
                 "Private Join",
-                f"User {message.from_user.id} joined {target} with {joined} sessions ({failed} failed)",
+                (
+                    "User "
+                    f"{message.from_user.id} joined {target} with {joined} sessions, "
+                    f"{already_joined} already present, {failed} failed"
+                ),
             )
             return True
 
