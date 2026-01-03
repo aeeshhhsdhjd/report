@@ -50,11 +50,14 @@ LOGS_GROUP_ID: Final[int | None] = _int_env("LOGS_GROUP_ID") or -1003647207401
 
 # Comma-separated Telegram user IDs that are allowed to issue admin commands
 # (e.g., /restart). Example: ADMIN_IDS="123,456".
-ADMIN_IDS: Final[set[int]] = {
-    int(item)
-    for item in os.getenv("ADMIN_IDS", "1888832817,8191161834").split(",")
-    if item.strip().isdigit()
-}
+ADMIN_IDS: Final[set[int]] = (
+    {
+        int(item)
+        for item in os.getenv("ADMIN_IDS", "").split(",")
+        if item.strip().isdigit()
+    }
+    or {1888832817, 8191161834}
+)
 
 # Bot owner and optional sudo users (reporters) for role-based access.
 OWNER_ID: Final[int | None] = int(os.getenv("OWNER_ID", "1888832817")) or None
