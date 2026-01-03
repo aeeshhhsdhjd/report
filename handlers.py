@@ -584,10 +584,20 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
 
     async def _run_report_job(message: Message, state) -> None:
         try:
-            success = await _execute_report(message, state)
+            result = await _execute_report(message, state)
+            success = result["any_success"]
             elapsed = monotonic() - state.started_at
             status = "Success" if success else "❌ Failed"
-            await message.reply_text(f"Report completed. Status: {status}")
+            summary_lines = [
+                "📊 Report attempt summary:",
+                f"- Target: {state.target_link}",
+                f"- Type: {'Private' if state.report_type == 'private' else 'Public'}",
+                f"- Sessions requested: {result['requested']}",
+                f"- Sessions attempted: {result['attempted']} / {result['total_sessions']} available",
+                f"- Successful reports: {result['success_count']}",
+                f"- Failed reports: {result['failure_count']}",
+            ]
+            await message.reply_text("\n".join([f"Report completed. Status: {status}"] + summary_lines))
             await persistence.record_report(
                 {
                     "user_id": message.from_user.id,
@@ -616,32 +626,47 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
         finally:
             states.reset(message.from_user.id)
 
-    async def _execute_report(message: Message, state) -> bool:
+    async def _execute_report(message: Message, state) -> dict:
         sessions = await prune_sessions(persistence)
+        total_sessions = len(sessions)
+        requested_count = state.report_count or total_sessions
         if not sessions:
             await message.reply_text("No valid sessions available.")
-            return False
+            return {
+                "any_success": False,
+                "success_count": 0,
+                "failure_count": 0,
+                "attempted": 0,
+                "total_sessions": 0,
+                "requested": requested_count,
+            }
 
-        await _log_stage("Report Started", f"User {message.from_user.id} executing with {len(sessions)} sessions")
+        await _log_stage(
+            "Report Started", f"User {message.from_user.id} executing with {len(sessions)} sessions"
+        )
 
         try:
             chat_ref, msg_id = _parse_link(state.target_link, state.report_type == "private")
         except ValueError:
             await message.reply_text("Invalid target link.")
-            return False
+            return {
+                "any_success": False,
+                "success_count": 0,
+                "failure_count": 0,
+                "attempted": 0,
+                "total_sessions": total_sessions,
+                "requested": requested_count,
+            }
 
         reason_code = state.reason_code if state.reason_code is not None else 9
         reason_text = state.reason_text or "Report"
         success_any = False
+        success_count = 0
+        failure_count = 0
 
-        count = state.report_count or 10
-        if count > len(sessions):
-            count = len(sessions)
-            await message.reply_text(
-                f"Only {count} sessions available; adjusting report count accordingly."
-            )
+        attempt_limit = min(requested_count, total_sessions)
 
-        for idx, session in enumerate(sessions[:count]):
+        for idx, session in enumerate(sessions[:attempt_limit]):
             client = Client(
                 name=f"report_{idx}",
                 api_id=config.API_ID,
@@ -653,15 +678,25 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
                 await client.start()
                 await send_report(client, chat_ref, msg_id, reason_code, reason_text)
                 success_any = True
+                success_count += 1
                 await asyncio.sleep(1.5)
             except RPCError:
+                failure_count += 1
                 continue
             except Exception:
+                failure_count += 1
                 continue
             finally:
                 with contextlib.suppress(Exception):
                     await client.stop()
-        return success_any
+        return {
+            "any_success": success_any,
+            "success_count": success_count,
+            "failure_count": failure_count,
+            "attempted": attempt_limit,
+            "total_sessions": total_sessions,
+            "requested": requested_count,
+        }
 
     async def _join_sessions_to_chat(target: str, message: Message) -> bool:
         sessions = await _sessions_available()
