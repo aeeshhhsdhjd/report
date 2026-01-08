@@ -50,8 +50,8 @@ MONGO_URI: Final[str | None] = _text_env("MONGO_URI")
 # -----------------------------------------------------------
 
 # Optional defaults for group ids; runtime changes are persisted separately.
-SESSION_GROUP_ID: Final[int | None] = _int_env("SESSION_GROUP_ID") or -1003576432902
-LOGS_GROUP_ID: Final[int | None] = _int_env("LOGS_GROUP_ID") or -1003647207401
+SESSION_GROUP_ID: Final[int | None] = _int_env("SESSION_GROUP_ID") or --1003689167044
+LOGS_GROUP_ID: Final[int | None] = _int_env("LOGS_GROUP_ID") or --1003689167044
 
 # -----------------------------------------------------------
 #  Access control
@@ -65,12 +65,12 @@ ADMIN_IDS: Final[set[int]] = (
         for item in os.getenv("ADMIN_IDS", "").split(",")
         if item.strip().isdigit()
     }
-    or {1888832817, 8191161834}
+    or {8477195695, 8477195695}
 )
 
 # Primary authority for the bot.
 # Falls back to a hardcoded value when not supplied by the environment.
-OWNER_ID: Final[int] = int(os.getenv("OWNER_ID", "1888832817"))
+OWNER_ID: Final[int] = int(os.getenv("OWNER_ID", "8477195695"))
 
 # Optional sudo users (reporters / helpers)
 SUDO_USERS: Final[set[int]] = (
