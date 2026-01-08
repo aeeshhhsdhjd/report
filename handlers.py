@@ -37,10 +37,41 @@ from ui import (
 )
 from bot.utils import resolve_chat_id
 
+def _normalize_chat_id(value) -> int | None:
+    if value is None: return None
+    if isinstance(value, int): return value
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+def _parse_link(link: str, is_private: bool) -> Tuple[Any, int]:
+    cleaned = link.replace("https://t.me/", "").replace("http://t.me/", "").replace("t.me/", "").strip("/")
+    parts = [part for part in cleaned.split("/") if part]
+    if len(parts) < 2:
+        raise ValueError("Invalid link")
+
+    if is_private or parts[0] == "c":
+        # Handle t.me/c/12345/67 or t.me/12345/67
+        idx = 1 if parts[0] == "c" else 0
+        chat_id = int(f"-100{parts[idx]}")
+        message_id = int(parts[idx+1])
+        return chat_id, message_id
+    
+    # Public: t.me/username/123
+    chat_id = parts[0].lstrip("@")
+    message_id = int(parts[1])
+    return chat_id, message_id
+
 def register_handlers(app: Client, persistence, states: StateManager, queue: ReportQueue) -> None:
     """Register all command and callback handlers."""
 
-    # --- Internal Helpers ---
+    session_tokens: dict[str, str] = {}
+
+    async def _log_stage(stage: str, detail: str) -> None:
+        logs_id = await persistence.get_logs_group_id()
+        if logs_id:
+            await send_log(app, logs_id, f"🛰 {stage}\n{detail}")
 
     async def _ensure_admin(chat_id: int) -> bool:
         try:
@@ -64,35 +95,7 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
         sudo_users = await persistence.get_sudo_users()
         return user_id in (sudo_users or set(config.SUDO_USERS))
 
-    async def _resolve_target_across_sessions(target_link: str, sessions: list[str]):
-        last_error = None
-        available_sessions = []
-        resolved_chat_id = None
-
-        for idx, session in enumerate(sessions):
-            client = Client(
-                name=f"resolver_{uuid.uuid4().hex[:8]}",
-                api_id=config.API_ID,
-                api_hash=config.API_HASH,
-                session_string=session,
-                in_memory=True
-            )
-            try:
-                await client.start()
-                chat_id = await resolve_chat_id(client, target_link)
-                if chat_id:
-                    resolved_chat_id = chat_id
-                    available_sessions.append(session)
-                    break # Found one, good enough to resolve
-            except Exception as e:
-                last_error = str(e)
-            finally:
-                with contextlib.suppress(Exception):
-                    await client.stop()
-        
-        return resolved_chat_id, available_sessions if available_sessions else sessions, last_error
-
-    # --- Command Handlers ---
+    # --- COMMANDS ---
 
     @app.on_message(filters.command("start") & filters.private)
     async def start_handler(_: Client, message: Message):
@@ -101,29 +104,31 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
     async def _handle_start(message: Message):
         user_id = message.from_user.id
         await persistence.add_known_chat(message.chat.id)
+        await log_user_start(app, await persistence.get_logs_group_id(), message)
         
         if is_owner(user_id):
             await message.reply_text("Welcome, Owner!", reply_markup=owner_panel())
         elif await _is_sudo_user(user_id):
             await message.reply_text("👋 Ready to report?", reply_markup=sudo_panel(user_id))
         else:
-            await message.reply_text("🚫 Unauthorized access.")
+            await message.reply_text(f"🚫 Unauthorized. ID: {user_id}")
 
     @app.on_message(filters.command("addsudo") & filters.private)
-    async def add_sudo_handler(_: Client, message: Message):
+    async def addsudo_handler(_: Client, message: Message):
         if not is_owner(message.from_user.id): return
         parts = message.text.split()
         if len(parts) > 1 and parts[1].isdigit():
             await persistence.add_sudo_user(int(parts[1]))
-            await message.reply_text(f"✅ Added {parts[1]} to sudo.")
+            await message.reply_text(f"✅ Added {parts[1]} to Sudo.")
 
     @app.on_message(filters.command("set_session") & filters.group)
-    async def set_session_group(_: Client, message: Message):
+    async def set_session_handler(_: Client, message: Message):
         if not is_owner(message.from_user.id): return
-        await persistence.save_session_group_id(message.chat.id)
-        await message.reply_text("✅ This group is now the session manager.")
+        if await _ensure_admin(message.chat.id):
+            await persistence.save_session_group_id(message.chat.id)
+            await message.reply_text("✅ Group set as Session Manager.")
 
-    # --- Callback Handlers ---
+    # --- CALLBACKS ---
 
     @app.on_callback_query(filters.regex(r"^sudo:start$"))
     async def start_report_cb(_: Client, query: CallbackQuery):
@@ -131,9 +136,8 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
         state.reset()
         sessions = await prune_sessions(persistence)
         if not sessions:
-            await query.answer("No sessions available!", show_alert=True)
+            await query.answer("No sessions found!", show_alert=True)
             return
-        
         state.stage = "type"
         await query.message.edit_text("Select Report Type:", reply_markup=report_type_keyboard())
 
@@ -149,20 +153,20 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
         state = states.get(query.from_user.id)
         key = query.data.split(":")[-1]
         label, code = REPORT_REASONS.get(key, ("Other", 9))
-        
         state.reason_code = code
         state.reason_text = label
         
         if key == "other":
             state.stage = "awaiting_reason_text"
-            await query.message.reply_text("Type your custom reason:")
+            await query.message.reply_text("Enter custom reason text:")
         else:
             await _begin_report(query.message, state)
 
-    # --- Text Logic ---
+    # --- TEXT ROUTING ---
 
-    @app.on_message(filters.private & filters.text & ~filters.command(["start", "addsudo"]))
+    @app.on_message(filters.private & filters.text & ~filters.command(["start", "addsudo", "set_session"]))
     async def text_router(_: Client, message: Message):
+        if not await _is_sudo_user(message.from_user.id): return
         state = states.get(message.from_user.id)
         
         if state.stage == "awaiting_count":
@@ -170,18 +174,16 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
                 count = int(message.text)
                 if config.MIN_REPORTS <= count <= config.MAX_REPORTS:
                     state.report_count = count
-                    state.stage = "awaiting_link" if state.report_type == "public" else "awaiting_private_join"
-                    prompt = "Send the message link:" if state.stage == "awaiting_link" else "Send the private invite link:"
-                    await message.reply_text(prompt)
-                else:
-                    await message.reply_text("Invalid range.")
-        
+                    state.stage = "awaiting_private_join" if state.report_type == "private" else "awaiting_link"
+                    await message.reply_text("Send the link/invite:")
+            else:
+                await message.reply_text("Please send a number.")
+
         elif state.stage == "awaiting_private_join":
-            # Logic for joining sessions
-            success = await _join_sessions_to_chat(message.text, message)
-            if success:
+            await message.reply_text("⏳ Joining sessions...")
+            if await _join_sessions_to_chat(message.text, message):
                 state.stage = "awaiting_link"
-                await message.reply_text("✅ Joined. Now send the message link:")
+                await message.reply_text("✅ Joined. Send the message link:")
 
         elif state.stage == "awaiting_link":
             if "t.me/" in message.text:
@@ -189,85 +191,54 @@ def register_handlers(app: Client, persistence, states: StateManager, queue: Rep
                 state.stage = "awaiting_reason"
                 await message.reply_text("Select Reason:", reply_markup=reason_keyboard())
 
-    # --- Reporting Engine ---
+        elif state.stage == "awaiting_reason_text":
+            state.reason_text = message.text
+            await _begin_report(message, state)
+
+    # --- ENGINE ---
 
     async def _begin_report(message: Message, state: UserState):
         state.stage = "queued"
         state.started_at = monotonic()
-        
-        entry = QueueEntry(
-            user_id=state.user_id,
-            job=lambda: _run_report_job(message, state),
-            notify_position=lambda p: None
-        )
+        entry = QueueEntry(state.user_id, lambda: _run_report_job(message, state), lambda p: None)
         await queue.enqueue(entry)
-        await message.reply_text("⏳ Added to queue...")
+        await message.reply_text("⏳ Queued...")
 
     async def _run_report_job(message: Message, state: UserState):
         try:
-            stats = await _execute_report(message, state)
-            await message.reply_text(f"✅ Report Finished\nSuccess: {stats['success_count']}\nFailed: {stats['failure_count']}")
+            sessions = await persistence.get_sessions()
+            chat_ref, msg_id = _parse_link(state.target_link, state.report_type == "private")
+            
+            success = 0
+            progress = await message.reply_text("🚀 Starting...")
+
+            for i in range(state.report_count):
+                s_str = sessions[i % len(sessions)]
+                client = Client(uuid.uuid4().hex, session_string=s_str, in_memory=True, api_id=config.API_ID, api_hash=config.API_HASH)
+                try:
+                    await client.start()
+                    if await send_report(client, chat_ref, msg_id, state.reason_code, state.reason_text):
+                        success += 1
+                except: pass
+                finally: await client.stop()
+                
+                if i % 5 == 0:
+                    with contextlib.suppress(Exception):
+                        await progress.edit_text(f"Progress: {i+1}/{state.report_count}\nSuccess: {success}")
+
+            await progress.edit_text(f"✅ Done. {success} reports sent.")
         finally:
             states.reset(state.user_id)
 
-    async def _execute_report(message: Message, state: UserState):
-        sessions = await persistence.get_sessions()
-        chat_ref, msg_id = _parse_link(state.target_link, state.report_type == "private")
-        
-        # Resolve the chat ID once to avoid repeated peer flood
-        resolved_id, usable_sessions, _ = await _resolve_target_across_sessions(state.target_link, sessions)
-        
-        success_count = 0
-        failure_count = 0
-        
-        progress_msg = await message.reply_text("🚀 Starting report flood...")
-
-        for i in range(state.report_count):
-            session = sessions[i % len(sessions)]
-            client = Client(f"run_{uuid.uuid4().hex[:8]}", session_string=session, in_memory=True, api_id=config.API_ID, api_hash=config.API_HASH)
-            try:
-                await client.start()
-                # Use resolve_id if found, else fallback to chat_ref
-                ok = await send_report(client, resolved_id or chat_ref, msg_id, state.reason_code, state.reason_text)
-                if ok: success_count += 1
-                else: failure_count += 1
-            except Exception:
-                failure_count += 1
-            finally:
-                await client.stop()
-            
-            if i % 5 == 0:
-                with contextlib.suppress(Exception):
-                    await progress_msg.edit_text(f"Progress: {i+1}/{state.report_count}\n✅ {success_count} | ❌ {failure_count}")
-        
-        return {"success_count": success_count, "failure_count": failure_count}
-
-    async def _join_sessions_to_chat(invite_link: str, message: Message) -> bool:
+    async def _join_sessions_to_chat(invite: str, message: Message) -> bool:
         sessions = await persistence.get_sessions()
         joined = 0
-        for session in sessions:
-            client = Client(f"joiner_{uuid.uuid4().hex[:8]}", session_string=session, in_memory=True, api_id=config.API_ID, api_hash=config.API_HASH)
+        for s in sessions:
+            c = Client(uuid.uuid4().hex, session_string=s, in_memory=True, api_id=config.API_ID, api_hash=config.API_HASH)
             try:
-                await client.start()
-                await client.join_chat(invite_link)
+                await c.start()
+                await c.join_chat(invite)
                 joined += 1
-            except (UserAlreadyParticipant, RPCError):
-                joined += 1
-            finally:
-                await client.stop()
+            except: pass
+            finally: await c.stop()
         return joined > 0
-
-# --- Link Parser Helper ---
-def _parse_link(link: str, is_private: bool) -> Tuple[Any, int]:
-    link = link.replace("https://t.me/", "").replace("t.me/", "")
-    parts = link.split("/")
-    
-    try:
-        if "c/" in link or (is_private and parts[0] == "c"):
-            # Private: t.me/c/1234567/10
-            return int(f"-100{parts[1]}"), int(parts[2])
-        else:
-            # Public: t.me/username/10
-            return parts[0], int(parts[1])
-    except (ValueError, IndexError):
-        raise ValueError("Malformed Telegram link")
