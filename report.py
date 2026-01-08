@@ -1,33 +1,50 @@
-"""Reporting helpers built on top of :class:`pyrogram.Client`.
+"""
+Reporting helpers built on top of :class:`pyrogram.Client`.
 
-The module adds a small `send_report` helper so the bot can call the raw
-MTProto ``messages.Report`` RPC with clean ergonomics. The functions here keep
-networking concerns centralized: concurrency, retries, and basic resilience are
-handled by higher-level flows in ``main.py``.
+This module exposes a small `send_report` helper that calls the raw
+MTProto ``messages.Report`` RPC with clean ergonomics.
+
+Concurrency, retries, flood-wait handling, and orchestration are expected
+to be handled by higher-level flows (e.g. main.py).
 """
 from __future__ import annotations
 
 import asyncio
-from typing import Iterable, Sequence
 
 from pyrogram import Client
-from pyrogram.errors import BadRequest, FloodWait, MessageIdInvalid, RPCError, PeerIdInvalid
+from pyrogram.errors import (
+    BadRequest,
+    FloodWait,
+    MessageIdInvalid,
+    PeerIdInvalid,
+    RPCError,
+    UsernameInvalid,
+)
+from pyrogram.raw.functions.contacts import ResolveUsername
+from pyrogram.raw.functions.messages import Report
 from pyrogram.raw.types import (
-    InputReportReasonChildAbuse,
-    InputReportReasonCopyright,
-    InputReportReasonFake,
-    InputReportReasonGeoIrrelevant,
-    InputReportReasonIllegalDrugs,
-    InputReportReasonOther,
-    InputReportReasonPersonalDetails,
-    InputReportReasonPornography,
+    InputPeerChannel,
+    InputPeerChat,
+    InputPeerUser,
     InputReportReasonSpam,
     InputReportReasonViolence,
+    InputReportReasonPornography,
+    InputReportReasonChildAbuse,
+    InputReportReasonCopyright,
+    InputReportReasonGeoIrrelevant,
+    InputReportReasonFake,
+    InputReportReasonIllegalDrugs,
+    InputReportReasonPersonalDetails,
+    InputReportReasonOther,
 )
 
 
-def _build_reason(reason: int | object, message: str) -> object:
-    """Return a Pyrogram InputReportReason object for the given code or instance."""
+# --------------------------------------------------------------------------- #
+# Helpers
+# --------------------------------------------------------------------------- #
+
+def _build_reason(reason: int | object) -> object:
+    """Return a Pyrogram InputReportReason instance from a code or object."""
 
     reason_map = {
         0: InputReportReasonSpam,
@@ -42,6 +59,7 @@ def _build_reason(reason: int | object, message: str) -> object:
         9: InputReportReasonOther,
     }
 
+    # Already a raw reason object
     if hasattr(reason, "write"):
         return reason
 
@@ -51,98 +69,110 @@ def _build_reason(reason: int | object, message: str) -> object:
         return InputReportReasonOther()
 
     reason_cls = reason_map.get(reason_int, InputReportReasonOther)
-    if reason_cls is InputReportReasonOther:
-        return reason_cls()
-
     return reason_cls()
 
 
 async def _resolve_peer_for_report(client: Client, chat_id):
-    """Resolve usernames or numeric ids into raw peers for reporting.
+    """Resolve chat/user identifiers into raw InputPeer objects.
 
-    Pyrogram's async helper resolves numeric IDs easily but can return
-    ``UsernameInvalid`` for plain strings if they are not cached. To keep the
-    reporting surface robust we fall back to ``contacts.ResolveUsername`` and
-    build the appropriate ``InputPeer*`` instance manually.
+    Supports:
+    - int IDs
+    - numeric strings (e.g. "-100...")
+    - usernames (@username or "username")
     """
 
-    from pyrogram.errors import UsernameInvalid
-    from pyrogram.raw.functions.contacts import ResolveUsername
-    from pyrogram.raw.types import InputPeerChannel, InputPeerChat, InputPeerUser
-
+    # Raw peer already provided
     if hasattr(chat_id, "write"):
         return chat_id
 
-    # Allow numeric strings so callers can pass ``-100…`` chat IDs directly
-    # without hitting the username resolution fallback below.
+    # Allow numeric strings
     if isinstance(chat_id, str) and chat_id.lstrip("-+").isdigit():
         chat_id = int(chat_id)
 
+    # First try Pyrogram's resolver
     try:
-        peer = client.resolve_peer(chat_id) if hasattr(client, "resolve_peer") else chat_id
-        return await peer if asyncio.iscoroutine(peer) else peer
+        return await client.resolve_peer(chat_id)
     except UsernameInvalid:
-        # Continue to raw username resolution below
         pass
     except ValueError as exc:
-        # Pyrogram raises ``ValueError(Peer id invalid: ...)`` for bad numeric inputs.
-        # Surface a consistent API error so callers can show a friendly message.
         raise BadRequest(f"Invalid target for reporting: {exc}") from exc
-    except Exception:
-        # For non-username inputs we want to bubble up the original error
-        # instead of masking it with a generic "Unable to resolve" message.
-        raise
 
+    # Fallback: raw username resolution
     username = str(chat_id).lstrip("@")
     try:
         resolved = await client.invoke(ResolveUsername(username=username))
+
         if resolved.users:
             user = resolved.users[0]
-            return InputPeerUser(user_id=user.id, access_hash=user.access_hash)
+            return InputPeerUser(
+                user_id=user.id,
+                access_hash=user.access_hash,
+            )
+
         if resolved.chats:
             chat = resolved.chats[0]
             if hasattr(chat, "access_hash"):
-                return InputPeerChannel(channel_id=chat.id, access_hash=chat.access_hash)
+                return InputPeerChannel(
+                    channel_id=chat.id,
+                    access_hash=chat.access_hash,
+                )
             return InputPeerChat(chat_id=chat.id)
+
     except Exception:
         pass
 
     raise BadRequest("Unable to resolve the target for reporting.")
 
 
-async def send_report(client: Client, chat_id, message_id: int, reason: int | object, reason_text: str) -> bool:
-    """Send a report against a specific message.
+# --------------------------------------------------------------------------- #
+# Public API
+# --------------------------------------------------------------------------- #
 
-    This helper resolves the target first so resolution errors (peer id invalid,
-    unable to resolve username) are surfaced consistently as BadRequest/PeerIdInvalid
-    and can be handled by callers.
+async def send_report(
+    client: Client,
+    chat_id,
+    message_id: int,
+    reason: int | object,
+    reason_text: str,
+) -> bool:
+    """Send a report against a specific Telegram message.
+
+    Returns:
+        True  -> report sent or message already invalid/deleted
+        False -> unexpected error occurred
     """
+
     try:
-        reason_obj = _build_reason(reason, reason_text)
+        reason_obj = _build_reason(reason)
 
-        # Pre-resolve the peer so errors like "Peer id invalid" or "Unable to resolve"
-        # are raised here and can be handled in a consistent way.
-        try:
-            resolved_peer = await _resolve_peer_for_report(client, chat_id)
-        except (BadRequest, PeerIdInvalid):
-            # Bubble up resolution-related API errors so callers can decide how to react.
-            raise
-        except Exception as exc:
-            # Wrap unexpected resolution errors into a BadRequest for consistency.
-            raise BadRequest(f"Unable to resolve the target for reporting: {exc}") from exc
+        # Resolve peer early so resolution errors are consistent
+        resolved_peer = await _resolve_peer_for_report(client, chat_id)
 
-        await client.send_report(chat_id=resolved_peer, message_id=message_id, reason=reason_obj, message=reason_text)
+        await client.invoke(
+            Report(
+                peer=resolved_peer,
+                id=[message_id],
+                reason=reason_obj,
+                message=reason_text,
+            )
+        )
+
         return True
 
     except MessageIdInvalid:
         print(
-            f"[{getattr(client, 'name', 'unknown')}] Message ID {message_id} is invalid or deleted. Skipping this message."
+            f"[{getattr(client, 'name', 'unknown')}] "
+            f"Message ID {message_id} is invalid or deleted. Skipping."
         )
         return True
-    except (FloodWait, BadRequest, RPCError):
-        # Let callers or higher-level flows handle these (flood waits, API errors).
+
+    except (FloodWait, BadRequest, PeerIdInvalid, RPCError):
+        # Let higher-level logic decide how to handle these
         raise
-    except Exception as exc:  # pragma: no cover - defensive logging
-        # Defensive logging for unexpected errors — do not crash the entire run.
-        print(f"[{getattr(client, 'name', 'unknown')}] Unexpected error while reporting: {exc}")
+
+    except Exception as exc:  # defensive fallback
+        print(
+            f"[{getattr(client, 'name', 'unknown')}] "
+            f"Unexpected error while reporting: {exc}"
+        )
         return False
