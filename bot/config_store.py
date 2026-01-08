@@ -1,67 +1,62 @@
 from __future__ import annotations
 
-"""Lightweight configuration helpers for the Pyrogram bot.
-
-This module persists dynamic configuration such as the session/logs groups and
-known chats. It reuses the existing ``DataStore`` when MongoDB is available and
-falls back to in-memory storage otherwise.
-"""
-
 import asyncio
+import logging
+from typing import Any
 
 from storage import DataStore, FallbackDataStore, build_datastore
 
-
 class ConfigStore:
-    """Persist and retrieve runtime configuration safely."""
+    """
+    High-level wrapper for runtime configuration.
+    Ensures thread-safe access and type consistency for chat IDs.
+    """
 
     def __init__(self, datastore: DataStore | FallbackDataStore) -> None:
         self.datastore = datastore
-        self._memory_config: dict[str, int | list[int]] = {}
         self._lock = asyncio.Lock()
 
-    async def get_value(self, key: str, default=None):
-        if isinstance(self.datastore, FallbackDataStore):
-            return self._memory_config.get(key, default)
+    async def _get_raw(self, key: str, default: Any = None) -> Any:
+        """Internal helper to fetch from datastore config collection."""
+        # Use the underlying datastore's logic to handle MongoDB vs In-Memory
+        try:
+            return await self.datastore._get_config_value(key) or default
+        except Exception as e:
+            logging.error(f"ConfigStore read error for {key}: {e}")
+            return default
 
-        async with self._lock:
-            doc = await self.datastore.db.config.find_one({"key": key})
-            return doc["value"] if doc else default
-
-    async def set_value(self, key: str, value) -> None:
-        if isinstance(self.datastore, FallbackDataStore):
-            self._memory_config[key] = value
-            return
-
-        async with self._lock:
-            await self.datastore.db.config.update_one(
-                {"key": key}, {"$set": {"value": value}}, upsert=True
-            )
-
-    async def add_known_chat(self, chat_id: int) -> None:
-        chats = set(await self.get_value("known_chats", []))
-        chats.add(int(chat_id))
-        await self.set_value("known_chats", list(chats))
-
-    async def known_chats(self) -> list[int]:
-        return list(await self.get_value("known_chats", []))
+    async def _set_raw(self, key: str, value: Any) -> None:
+        """Internal helper to write to datastore config collection."""
+        try:
+            await self.datastore._set_config_value(key, value)
+        except Exception as e:
+            logging.error(f"ConfigStore write error for {key}: {e}")
 
     async def session_group(self) -> int | None:
-        return await self.get_value("session_group")
+        val = await self._get_raw("session_group")
+        return int(val) if val is not None else None
 
-    async def set_session_group(self, chat_id: int) -> None:
-        await self.set_value("session_group", int(chat_id))
+    async def set_session_group(self, chat_id: int | str) -> None:
+        await self._set_raw("session_group", int(chat_id))
 
     async def logs_group(self) -> int | None:
-        return await self.get_value("logs_group")
+        val = await self._get_raw("logs_group")
+        return int(val) if val is not None else None
 
-    async def set_logs_group(self, chat_id: int) -> None:
-        await self.set_value("logs_group", int(chat_id))
+    async def set_logs_group(self, chat_id: int | str) -> None:
+        await self._set_raw("logs_group", int(chat_id))
 
+    async def add_known_chat(self, chat_id: int | str) -> None:
+        """Leverages the specialized datastore method for unique chat tracking."""
+        await self.datastore.add_known_chat(int(chat_id))
+
+    async def known_chats(self) -> list[int]:
+        """Returns list of chats the bot has interacted with."""
+        return await self.datastore.known_chats()
 
 def build_config_store(mongo_uri: str | None) -> tuple[ConfigStore, DataStore | FallbackDataStore]:
+    """Factory to initialize the full storage stack."""
     datastore = build_datastore(mongo_uri)
     return ConfigStore(datastore), datastore
-
 
 __all__ = ["ConfigStore", "build_config_store"]
