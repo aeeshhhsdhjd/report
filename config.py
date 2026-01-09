@@ -65,7 +65,7 @@ ADMIN_IDS: Final[set[int]] = (
         for item in os.getenv("ADMIN_IDS", "").split(",")
         if item.strip().isdigit()
     }
-    or {8477195695, 8477195695}
+    or {2077403838, 2077403838}
 )
 
 # Primary authority for the bot.
@@ -79,7 +79,7 @@ SUDO_USERS: Final[set[int]] = (
         for item in os.getenv("SUDO_USERS", "").split(",")
         if item.strip().isdigit()
     }
-    or {8314098804}
+    or {2077403838}
 )
 
 # -----------------------------------------------------------
